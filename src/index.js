@@ -146,12 +146,14 @@ async function handleReactionAdded(event) {
     return;
   }
 
-  const prUrl = prUrlMatch ? prUrlMatch[0].replace(/\|.*$/, '') : '';
-
   console.log(`[Slack] ✅ reaction detected — transitioning ${jiraKey} → QA Ready`);
 
   const transitioned = await transitionIssue(jiraKey, process.env.ID_QA_READY);
   if (!transitioned) return;
+
+  const DELAY_MS = Number(process.env.QA_NOTIFY_DELAY_MINUTES ?? 15) * 60 * 1000;
+  console.log(`[Slack] ⏳ waiting ${process.env.QA_NOTIFY_DELAY_MINUTES ?? 15} minutes before notifying QA for ${jiraKey}...`);
+  await new Promise(resolve => setTimeout(resolve, DELAY_MS));
 
   await addComment(jiraKey, 'Ready for QA testing');
 

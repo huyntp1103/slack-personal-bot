@@ -24,6 +24,7 @@ process.env.SLACK_REVIEW_CHANNEL = 'C05F65TBB9P';
 process.env.ID_IN_REVIEW = '41';
 process.env.ID_QA_READY = '51';
 process.env.SLACK_SIGNING_SECRET = '';
+process.env.QA_NOTIFY_DELAY_MINUTES = '15';
 
 const request = require('supertest');
 const app = require('../src/index');
@@ -127,35 +128,48 @@ function reactionPayload(overrides = {}) {
 }
 
 describe('handleReactionAdded', () => {
-  test('transitions to QA Ready and adds comment', async () => {
+  beforeEach(() => jest.useFakeTimers({ doNotFake: ['setImmediate', 'nextTick'] }));
+  afterEach(() => jest.useRealTimers());
+
+  // Helper: send reaction, advance all timers, flush pending microtasks
+  async function sendReaction(payload = reactionPayload()) {
+    await request(app).post('/slack/events').send(payload);
+    await jest.runAllTimersAsync();
+  }
+
+  test('transitions to QA Ready immediately (before delay)', async () => {
     await request(app).post('/slack/events').send(reactionPayload());
     expect(transitionIssue).toHaveBeenCalledWith('UP-69726', '51');
+  });
+
+  test('adds comment after delay', async () => {
+    await sendReaction();
     expect(addComment).toHaveBeenCalled();
   });
 
   test('ignores reactions from other users', async () => {
-    await request(app).post('/slack/events').send(reactionPayload({ user: 'UOTHER' }));
+    await sendReaction(reactionPayload({ user: 'UOTHER' }));
     expect(transitionIssue).not.toHaveBeenCalled();
   });
 
   test('ignores non-checkmark reactions', async () => {
-    await request(app).post('/slack/events').send(reactionPayload({ reaction: 'thumbsup' }));
+    await sendReaction(reactionPayload({ reaction: 'thumbsup' }));
     expect(transitionIssue).not.toHaveBeenCalled();
   });
 
   test('skips if base branch is not develop', async () => {
     fetchPrData.mockResolvedValue({ title: 'feat: UP-69726 feature', baseBranch: 'main' });
-    await request(app).post('/slack/events').send(reactionPayload());
+    await sendReaction();
     expect(transitionIssue).not.toHaveBeenCalled();
   });
 
   test('skips comment and Slack reply if transition returns false', async () => {
     transitionIssue.mockResolvedValue(false);
-    await request(app).post('/slack/events').send(reactionPayload());
+    await sendReaction();
     expect(addComment).not.toHaveBeenCalled();
   });
 
-  test('replies to Slack thread for Bug tickets', async () => {
+  test('replies to Slack thread for Bug tickets after delay', async () => {
     const { replyToThread } = require('../src/slack');
     replyToThread.mockResolvedValue(undefined);
     getIssue.mockResolvedValue({
@@ -164,7 +178,7 @@ describe('handleReactionAdded', () => {
         description: 'https://workspace.slack.com/archives/C0ABC1234/p1712345678901234',
       },
     });
-    await request(app).post('/slack/events').send(reactionPayload());
+    await sendReaction();
     expect(replyToThread).toHaveBeenCalledWith('C0ABC1234', '1712345678.901234', expect.any(String));
   });
 
@@ -173,7 +187,7 @@ describe('handleReactionAdded', () => {
     getIssue.mockResolvedValue({
       fields: { issuetype: { name: 'Story' }, description: null },
     });
-    await request(app).post('/slack/events').send(reactionPayload());
+    await sendReaction();
     expect(replyToThread).not.toHaveBeenCalled();
   });
 });

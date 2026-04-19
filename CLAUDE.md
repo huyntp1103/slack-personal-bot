@@ -138,6 +138,8 @@ npx ngrok http 3000    # expose to Slack Events API
 npm test
 ```
 
+After modifying any source file, always consider whether new or updated tests are needed to cover the changed logic, then run `npm test` to confirm all tests pass before considering the task complete.
+
 ## Slack App Setup
 
 1. Go to api.slack.com/apps → Create New App → From Scratch
