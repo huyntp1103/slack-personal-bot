@@ -1,6 +1,18 @@
 'use strict';
 
 const { Version2Client } = require('jira.js');
+const { preview } = require('./slack');
+
+const TRANSITION_NAMES = {
+  [process.env.ID_TO_DO]:       'To Do',
+  [process.env.ID_IN_PROGRESS]: 'In Progress',
+  [process.env.ID_IN_REVIEW]:   'In Review',
+  [process.env.ID_QA_READY]:    'QA Ready',
+  [process.env.ID_QA_FAILED]:   'QA Failed',
+  [process.env.ID_IN_TEST]:     'In Test',
+  [process.env.ID_QA_SUCCESS]:  'QA Success',
+  [process.env.ID_WILL_NOT_FIX]:'Will Not Fix',
+};
 
 const client = new Version2Client({
   host: process.env.JIRA_HOST,
@@ -22,7 +34,8 @@ const client = new Version2Client({
 async function transitionIssue(issueKey, transitionId) {
   if (!transitionId) return;
   if (process.env.DRY_RUN === 'true') {
-    console.log(`[DRY RUN] Would transition ${issueKey} → transition id ${transitionId}`);
+    const statusName = TRANSITION_NAMES[transitionId] || `id ${transitionId}`;
+    await preview(`🔔 *[PREVIEW] Jira transition*\nTicket: *${issueKey}*\nAction: Change status → *${statusName}*`);
     return;
   }
   try {
@@ -30,7 +43,8 @@ async function transitionIssue(issueKey, transitionId) {
       issueIdOrKey: issueKey,
       transition: { id: transitionId },
     });
-    console.log(`[Jira] Transitioned ${issueKey} → transition ${transitionId}`);
+    const statusName = TRANSITION_NAMES[transitionId] || `id ${transitionId}`;
+    console.log(`[Jira] Transitioned ${issueKey} → ${statusName}`);
   } catch (err) {
     console.error(`[Jira] transitionIssue(${issueKey}, ${transitionId}) failed:`, err.message);
   }
@@ -44,24 +58,13 @@ async function transitionIssue(issueKey, transitionId) {
  */
 async function addComment(issueKey, text) {
   if (process.env.DRY_RUN === 'true') {
-    console.log(`[DRY RUN] Would add comment to ${issueKey}: "${text}"`);
+    await preview(`🔔 *[PREVIEW] Jira comment*\nTicket: *${issueKey}*\nComment: ${text}`);
     return;
   }
   try {
     await client.issueComments.addComment({
       issueIdOrKey: issueKey,
-      requestBody: {
-        body: {
-          type: 'doc',
-          version: 1,
-          content: [
-            {
-              type: 'paragraph',
-              content: [{ type: 'text', text }],
-            },
-          ],
-        },
-      },
+      comment: text,
     });
     console.log(`[Jira] Comment added to ${issueKey}`);
   } catch (err) {

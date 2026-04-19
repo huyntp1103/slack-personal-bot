@@ -17,8 +17,14 @@ if [[ "$BRANCH" == "HEAD" || "$BRANCH" == "main" || "$BRANCH" == "master" || "$B
   exit 0
 fi
 
-# Only act on the first push — when no upstream exists yet
-if git rev-parse --abbrev-ref "@{u}" &>/dev/null; then
+# Detect first push by checking if the remote branch existed before this push.
+# git stash list of remote tracking refs — if origin/BRANCH doesn't exist as a
+# ref *prior* to this push, it means we just created it now.
+REMOTE_REF="refs/remotes/origin/${BRANCH}"
+PREV_REMOTE=$(git rev-parse "${REMOTE_REF}@{1}" 2>/dev/null || echo "")
+
+# If there's no prior remote ref history, this is the first push
+if [[ -n "$PREV_REMOTE" ]]; then
   exit 0
 fi
 

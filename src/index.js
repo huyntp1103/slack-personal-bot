@@ -7,6 +7,7 @@ const express = require('express');
 const { transitionIssue, addComment, getIssue } = require('./jira');
 const { replyToThread, fetchMessage } = require('./slack');
 const { extractJiraKey, extractSlackThread } = require('./utils');
+const { fetchPrTitle } = require('./github');
 
 const app = express();
 
@@ -42,6 +43,8 @@ app.post('/slack/events', async (req, res) => {
   const event = body.event;
   if (!event) return;
 
+  // console.log(`[Slack] event type=${event.type} user=${event.user} channel=${event.channel} text=${JSON.stringify(event.text)}`);
+
   if (event.type === 'message') {
     await handleReviewMessage(event);
   } else if (event.type === 'reaction_added') {
@@ -76,11 +79,24 @@ async function handleReviewMessage(event) {
   const text = event.text || '';
 
   // Must contain a GitHub PR link
-  if (!/github\.com\/.+\/pull\/\d+/.test(text)) return;
+  // Slack wraps URLs in angle brackets: <https://github.com/...> — strip them before matching
+  const cleanText = text.replace(/<([^>]+)>/g, '$1');
+  const prUrlMatch = cleanText.match(/https:\/\/github\.com\/[^|\s]+\/pull\/\d+/);
+  if (!prUrlMatch) return;
 
-  const jiraKey = extractJiraKey(text);
+  // Try extracting Jira key from message text first, fallback to PR title
+  let jiraKey = extractJiraKey(text);
+
   if (!jiraKey) {
-    console.log('[Slack] message event: no Jira key found in message');
+    const prTitle = await fetchPrTitle(prUrlMatch[0]);
+    if (prTitle) {
+      jiraKey = extractJiraKey(prTitle);
+      console.log(`[GitHub] PR title: "${prTitle}"`);
+    }
+  }
+
+  if (!jiraKey) {
+    console.log('[Slack] message event: no Jira key found in message or PR title');
     return;
   }
 
@@ -105,19 +121,29 @@ async function handleReactionAdded(event) {
   }
 
   const text = message.text || '';
-  const jiraKey = extractJiraKey(text);
-  if (!jiraKey) {
-    console.log('[Slack] reaction_added: no Jira key found in message');
-    return;
+  const cleanText = text.replace(/<([^>]+)>/g, '$1');
+  const prUrlMatch = cleanText.match(/https:\/\/github\.com\/[^|\s]+\/pull\/\d+/);
+
+  let jiraKey = extractJiraKey(text);
+
+  if (!jiraKey && prUrlMatch) {
+    const prTitle = await fetchPrTitle(prUrlMatch[0]);
+    if (prTitle) {
+      jiraKey = extractJiraKey(prTitle);
+      console.log(`[GitHub] PR title: "${prTitle}"`);
+    }
   }
 
-  const prUrlMatch = text.match(/https:\/\/github\.com\/\S+\/pull\/\d+/);
-  const prUrl = prUrlMatch ? prUrlMatch[0] : '';
+  if (!jiraKey) {
+    console.log('[Slack] reaction_added: no Jira key found in message or PR title');
+    return;
+  }
+  const prUrl = prUrlMatch ? prUrlMatch[0].replace(/\|.*$/, '') : '';
 
-  console.log(`[Slack] ✅ reaction detected — transitioning ${jiraKey} → QA Ready`);
+  // console.log(`[Slack] ✅ reaction detected — transitioning ${jiraKey} → QA Ready`);
 
   await transitionIssue(jiraKey, process.env.ID_QA_READY);
-  await addComment(jiraKey, `✅ Fixed and merged. Ready for QA.${prUrl ? `\nPR: ${prUrl}` : ''}`);
+  await addComment(jiraKey, 'Ready for QA testing');
 
   try {
     const issue = await getIssue(jiraKey);
@@ -129,7 +155,7 @@ async function handleReactionAdded(event) {
         await replyToThread(
           thread.channel,
           thread.ts,
-          `🚀 *Update:* Ticket ${jiraKey} has been merged and is ready for testing!`
+          `Dạ card này test được rồi ạ`
         );
       } else {
         console.log(`[Slack] Bug ${jiraKey} has no Slack thread link in Jira description`);

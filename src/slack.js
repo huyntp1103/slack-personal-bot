@@ -14,7 +14,7 @@ const slack = new WebClient(process.env.SLACK_BOT_TOKEN);
  */
 async function replyToThread(channel, ts, text) {
   if (process.env.DRY_RUN === 'true') {
-    console.log(`[DRY RUN] Would reply to Slack thread ${channel}/${ts}: "${text}"`);
+    await preview(`🔔 *[PREVIEW] Slack thread reply*\nChannel: \`${channel}\` Thread: \`${ts}\`\nMessage: ${text}`);
     return;
   }
   try {
@@ -48,4 +48,23 @@ async function fetchMessage(channel, ts) {
   }
 }
 
-module.exports = { replyToThread, fetchMessage };
+/**
+ * Posts a dry-run preview message to SLACK_PREVIEW_CHANNEL.
+ * Only active when DRY_RUN=true.
+ *
+ * @param {string} text
+ */
+async function preview(text) {
+  const channel = process.env.SLACK_PREVIEW_CHANNEL;
+  if (!channel) {
+    console.log(`[DRY RUN] ${text}`);
+    return;
+  }
+  try {
+    await slack.chat.postMessage({ channel, text });
+  } catch (err) {
+    console.error(`[DRY RUN] preview post failed:`, err.message);
+  }
+}
+
+module.exports = { replyToThread, fetchMessage, preview };
