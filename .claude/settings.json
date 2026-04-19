@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm init *)",
+      "Bash(npm install *)"
+    ],
+    "additionalDirectories": [
+      "/Users/huynguyen-mac-be/personal-slack-bot"
+    ]
+  }
+}

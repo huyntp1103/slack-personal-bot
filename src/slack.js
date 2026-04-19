@@ -1,0 +1,51 @@
+'use strict';
+
+const { WebClient } = require('@slack/web-api');
+
+const slack = new WebClient(process.env.SLACK_BOT_TOKEN);
+
+/**
+ * Replies to an existing Slack thread.
+ * Bot must have chat:write or chat:write.public scope.
+ *
+ * @param {string} channel - Slack channel ID
+ * @param {string} ts - Thread timestamp in dot format (e.g. 1712345678.901234)
+ * @param {string} text
+ */
+async function replyToThread(channel, ts, text) {
+  if (process.env.DRY_RUN === 'true') {
+    console.log(`[DRY RUN] Would reply to Slack thread ${channel}/${ts}: "${text}"`);
+    return;
+  }
+  try {
+    await slack.chat.postMessage({ channel, thread_ts: ts, text });
+    console.log(`[Slack] Replied to thread ${ts} in ${channel}`);
+  } catch (err) {
+    console.error(`[Slack] replyToThread(${channel}, ${ts}) failed:`, err.message);
+  }
+}
+
+/**
+ * Fetches a single message by channel + timestamp.
+ * Requires channels:history scope.
+ *
+ * @param {string} channel
+ * @param {string} ts
+ * @returns {Promise<object|null>}
+ */
+async function fetchMessage(channel, ts) {
+  try {
+    const result = await slack.conversations.history({
+      channel,
+      latest: ts,
+      limit: 1,
+      inclusive: true,
+    });
+    return result.messages?.[0] ?? null;
+  } catch (err) {
+    console.error(`[Slack] fetchMessage(${channel}, ${ts}) failed:`, err.message);
+    return null;
+  }
+}
+
+module.exports = { replyToThread, fetchMessage };

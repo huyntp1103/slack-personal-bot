@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# post-push — fires after every `git push`
+# Transitions the Jira ticket to In Progress on the first push of a new branch.
+#
+# Install into a repo:
+#   ln -sf /path/to/personal-slack-bot/hooks/post-push .git/hooks/post-push
+#   chmod +x /path/to/personal-slack-bot/hooks/post-push
+
+set -euo pipefail
+
+BOT_URL="${BOT_URL:-http://localhost:3000}"
+
+BRANCH=$(git rev-parse --abbrev-ref HEAD)
+
+# Skip detached HEAD or main/master/develop pushes
+if [[ "$BRANCH" == "HEAD" || "$BRANCH" == "main" || "$BRANCH" == "master" || "$BRANCH" == "develop" ]]; then
+  exit 0
+fi
+
+# Only act on the first push — when no upstream exists yet
+if git rev-parse --abbrev-ref "@{u}" &>/dev/null; then
+  exit 0
+fi
+
+# Extract Jira key from the last commit message, fallback to branch name
+COMMIT_MSG=$(git log -1 --pretty=%s)
+JIRA_KEY=$(echo "$COMMIT_MSG" | grep -oE '[A-Z]+-[0-9]+' | head -1)
+
+if [[ -z "$JIRA_KEY" ]]; then
+  JIRA_KEY=$(echo "$BRANCH" | grep -oE '[A-Z]+-[0-9]+' | head -1)
+fi
+
+if [[ -z "$JIRA_KEY" ]]; then
+  echo "[post-push] No Jira key found in commit message or branch name — skipping"
+  exit 0
+fi
+
+echo "[post-push] Notifying bot: $JIRA_KEY → In Progress"
+
+curl -s -X POST "${BOT_URL}/git/push" \
+  -H "Content-Type: application/json" \
+  -d "{\"jiraKey\":\"${JIRA_KEY}\"}" \
+  --max-time 5 \
+  || echo "[post-push] Warning: bot unreachable — Jira not updated"
+
+exit 0
