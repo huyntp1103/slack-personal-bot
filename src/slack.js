@@ -21,7 +21,7 @@ async function replyToThread(channel, ts, text) {
     await slack.chat.postMessage({ channel, thread_ts: ts, text });
     console.log(`[Slack] Replied to thread ${ts} in ${channel}`);
   } catch (err) {
-    console.error(`[Slack] replyToThread(${channel}, ${ts}) failed:`, err.message);
+    console.log(`[Slack] replyToThread(${channel}, ${ts}) failed:`, err.message);
   }
 }
 
@@ -43,7 +43,7 @@ async function fetchMessage(channel, ts) {
     });
     return result.messages?.[0] ?? null;
   } catch (err) {
-    console.error(`[Slack] fetchMessage(${channel}, ${ts}) failed:`, err.message);
+    console.log(`[Slack] fetchMessage(${channel}, ${ts}) failed:`, err.message);
     return null;
   }
 }
@@ -63,7 +63,7 @@ async function preview(text) {
   try {
     await slack.chat.postMessage({ channel, text });
   } catch (err) {
-    console.error(`[DRY RUN] preview post failed:`, err.message);
+    console.log(`[DRY RUN] preview post failed:`, err.message);
   }
 }
 

@@ -43,8 +43,6 @@ app.post('/slack/events', async (req, res) => {
   const event = body.event;
   if (!event) return;
 
-  // console.log(`[Slack] event type=${event.type} user=${event.user} channel=${event.channel} text=${JSON.stringify(event.text)}`);
-
   if (event.type === 'message') {
     await handleReviewMessage(event);
   } else if (event.type === 'reaction_added') {
@@ -150,7 +148,7 @@ async function handleReactionAdded(event) {
 
   const prUrl = prUrlMatch ? prUrlMatch[0].replace(/\|.*$/, '') : '';
 
-  // console.log(`[Slack] ✅ reaction detected — transitioning ${jiraKey} → QA Ready`);
+  console.log(`[Slack] ✅ reaction detected — transitioning ${jiraKey} → QA Ready`);
 
   const transitioned = await transitionIssue(jiraKey, process.env.ID_QA_READY);
   if (!transitioned) return;
@@ -174,7 +172,7 @@ async function handleReactionAdded(event) {
       }
     }
   } catch (err) {
-    console.error(`[Slack] handleReactionAdded post-transition error (${jiraKey}):`, err.message);
+    console.log(`[Slack] handleReactionAdded post-transition error (${jiraKey}):`, err.message);
   }
 }
 
@@ -200,5 +198,9 @@ function verifySlackSignature(req) {
 
 // ─── Start ────────────────────────────────────────────────────────────────────
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Bot running on port ${PORT}`));
+if (require.main === module) {
+  const PORT = process.env.PORT || 3000;
+  app.listen(PORT, () => console.log(`Bot running on port ${PORT}`));
+}
+
+module.exports = app;

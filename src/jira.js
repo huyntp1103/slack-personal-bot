@@ -76,7 +76,7 @@ async function transitionIssue(issueKey, transitionId) {
     console.log(`[Jira] Transitioned ${issueKey} → ${statusName}`);
     return true;
   } catch (err) {
-    console.error(`[Jira] transitionIssue(${issueKey}, ${transitionId}) failed:`, err.message);
+    console.log(`[Jira] transitionIssue(${issueKey}, ${transitionId}) failed:`, err.message);
     return false;
   }
 }
@@ -99,7 +99,7 @@ async function addComment(issueKey, text) {
     });
     console.log(`[Jira] Comment added to ${issueKey}`);
   } catch (err) {
-    console.error(`[Jira] addComment(${issueKey}) failed:`, err.message);
+    console.log(`[Jira] addComment(${issueKey}) failed:`, err.message);
   }
 }
 

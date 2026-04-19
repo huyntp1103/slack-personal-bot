@@ -22,7 +22,7 @@ async function fetchPrData(prUrl) {
     });
 
     if (!res.ok) {
-      console.error(`[GitHub] fetchPrData failed: ${res.status} ${res.statusText}`);
+      console.log(`[GitHub] fetchPrData failed: ${res.status} ${res.statusText}`);
       return null;
     }
 
@@ -32,7 +32,7 @@ async function fetchPrData(prUrl) {
       baseBranch: data.base?.ref ?? null,
     };
   } catch (err) {
-    console.error('[GitHub] fetchPrData error:', err.message);
+    console.log('[GitHub] fetchPrData error:', err.message);
     return null;
   }
 }

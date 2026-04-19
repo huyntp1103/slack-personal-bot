@@ -1,8 +1,8 @@
 # Implementation Plan: GitHub → Jira → Slack Bot (Slack-driven)
 
-## Architecture Summary
+## Status: Implemented ✅
 
-No GitHub webhooks (team repo blocks it). Instead:
+## Architecture
 
 ```
 git push (local hook) ──────────────────────────────► POST /git/push → Jira: In Progress
@@ -10,134 +10,99 @@ Slack #backend-review-code (new root message) ───────► POST /sla
 Slack #backend-review-code (✅ reaction added) ──────► POST /slack/events → Jira: QA Ready + comment + Slack thread
 ```
 
----
+## Source Files
 
-## Implementation Order
+| File | Responsibility |
+| --- | --- |
+| `src/index.js` | Express server, route handlers, Slack signature verification |
+| `src/jira.js` | `transitionIssue`, `addComment`, `getIssue` |
+| `src/slack.js` | `replyToThread`, `fetchMessage`, `preview` |
+| `src/github.js` | `fetchPrData` (title + base branch), `fetchPrTitle` |
+| `src/utils.js` | `extractJiraKey`, `extractSlackThread` |
+| `hooks/post-push` | Bash git hook — detects first push, calls `/git/push` |
 
-```
-Phase 0: Scaffolding (package.json, .env.example)          ✅ done
-Phase 1: src/utils.js                                       ✅ done
-Phase 2: src/jira.js                                        ✅ done
-Phase 3: src/slack.js                                       ✅ done
-Phase 4: src/index.js — add /slack/events route             ← rewrite needed
-Phase 5: hooks/post-push — local git hook                   ← new
-Phase 6: Update .env.example with new vars                  ← new
-```
-
----
-
-## Phase 4: `src/index.js` — Rewrite
-
-Remove the old `/webhook` GitHub route. Add two routes:
-
-### `POST /slack/events`
-
-Handles all inbound Slack events. Must:
-
-1. **Respond immediately with 200** (Slack retries if no fast response)
-2. **Handle `url_verification`** challenge (one-time setup ping from Slack)
-3. **Verify Slack signing secret** via `X-Slack-Signature` + `X-Slack-Request-Timestamp`
-   - HMAC-SHA256 of `v0:<timestamp>:<raw body>` with `SLACK_SIGNING_SECRET`
-   - Compare against `X-Slack-Signature` header
-   - Reject if timestamp is >5 minutes old (replay attack protection)
-4. **Route by `event.type`**:
-   - `message` → `handleReviewMessage(event)`
-   - `reaction_added` → `handleReactionAdded(event)`
-
-### `handleReviewMessage(event)`
-
-Trigger: In Review
-
-Conditions (all must pass):
-- `event.user === MY_SLACK_USER_ID`
-- `event.channel === SLACK_REVIEW_CHANNEL`
-- No `event.thread_ts`, or `event.thread_ts === event.ts` (root message only)
-- `event.text` contains a GitHub PR URL (match `github.com/.*/pull/\d+`)
-- Extract Jira key from `event.text` via `/[A-Z]+-\d+/`
-
-Action: `transitionIssue(key, ID_IN_REVIEW)`
-
-### `handleReactionAdded(event)`
-
-Trigger: QA Ready + Slack notify
-
-Conditions (all must pass):
-- `event.user === MY_SLACK_USER_ID`
-- `event.reaction === 'white_check_mark'`
-- `event.item.type === 'message'`
-- `event.item.channel === SLACK_REVIEW_CHANNEL`
-
-Flow:
-1. Fetch the original message via `slack.conversations.history` with `channel` + `latest=event.item.ts` + `limit=1` + `inclusive=true`
-2. Extract Jira key from the message text
-3. `transitionIssue(key, ID_QA_READY)`
-4. `addComment(key, "✅ Fixed and merged. Ready for QA.\nPR: <pr_url>")`
-5. `getIssue(key)` → if type is Bug → `extractSlackThread(description)` → `replyToThread(...)`
-
-### `POST /git/push`
-
-Called by the local `post-push` hook.
-
-Body: `{ jiraKey: "UP-68162" }`
-
-Action: `transitionIssue(jiraKey, ID_IN_PROGRESS)`
-
-No auth needed (localhost only — the hook calls `http://localhost:3000/git/push`). On Railway, this endpoint should be firewall-restricted or accept a simple shared secret via header.
-
----
-
-## Phase 5: `hooks/post-push`
-
-Shell script installed as `.git/hooks/post-push` in the target repo.
-
-Logic:
-1. Get current branch: `git rev-parse --abbrev-ref HEAD`
-2. Check if branch has a remote upstream: `git rev-parse --abbrev-ref @{u} 2>/dev/null`
-3. If no upstream → this is the first push (new branch = new PR starting) → extract Jira key from branch name or last commit message → POST to `$BOT_URL/git/push`
-4. If upstream exists → already pushed before → skip (avoid re-triggering In Progress)
-
-Jira key extraction from commit: `git log -1 --pretty=%s` → regex `/[A-Z]+-\d+/`
-Fallback: extract from branch name.
-
----
-
-## Slack Signing Verification — Critical Details
+## Transition Guard Logic (in `transitionIssue`)
 
 ```
-basestring = "v0:" + X-Slack-Request-Timestamp + ":" + raw_body
-sig = "v0=" + hmac_sha256(SLACK_SIGNING_SECRET, basestring)
-compare with X-Slack-Signature header using timingSafeEqual
+1. Fetch issue from Jira (status + sprint fields)
+2. Check required current status:
+   - → In Progress  requires current = "To Do"
+   - → In Review    requires current = "In Progress"
+   - → QA Ready     requires current = "In Review"
+   - other targets: no restriction
+3. If → In Progress: check customfield_10010 (sprint array) — block if any sprint.id === 249
+4. If DRY_RUN=true: post preview to SLACK_PREVIEW_CHANNEL, return true
+5. Call doTransition
+6. Return true on success, false on skip or error
 ```
 
-Must use `req.rawBody` (not re-serialized JSON) — same gotcha as GitHub signature.
-Reject requests where `|Date.now()/1000 - timestamp| > 300` (5 min replay window).
+Callers check the return value — `addComment` and `replyToThread` are only called if `transitionIssue` returns `true`.
 
----
-
-## Edge Cases
-
-| # | Case | Handling |
-| --- | --- | --- |
-| 1 | Slack retries the same event | Slack sends `X-Slack-Retry-Num` header on retry — respond 200 immediately and skip processing |
-| 2 | Message has no Jira key | Log and return silently |
-| 3 | Message is a reply, not root | Check `thread_ts === ts` or `!thread_ts` |
-| 4 | Reaction on someone else's message | `event.item_user !== MY_SLACK_USER_ID` check (belt-and-suspenders) |
-| 5 | Transition 400 (already in state) | try/catch in `transitionIssue` — already handled |
-| 6 | `url_verification` on first Slack setup | Return `{ challenge }` immediately |
-| 7 | `post-push` on upstream push (not first) | Check for existing `@{u}` — skip if found |
-
----
-
-## New Environment Variables (additions to existing)
+## handleReviewMessage Flow
 
 ```
-SLACK_SIGNING_SECRET=   # From Slack App → Basic Information
-MY_SLACK_USER_ID=       # Your Slack member ID (Settings → Profile → copy member ID)
-SLACK_REVIEW_CHANNEL=   # Channel ID for #backend-review-code (not the name)
-BOT_URL=                # http://localhost:3000 (dev) or https://<app>.railway.app (prod)
+1. Filter: user === MY_SLACK_USER_ID
+2. Filter: channel === SLACK_REVIEW_CHANNEL
+3. Filter: root message (no thread_ts or thread_ts === ts)
+4. Strip Slack angle-bracket URL wrapping: <https://...> → https://...
+5. Match GitHub PR URL regex
+6. extractJiraKey from message text
+7. If no key: fetchPrTitle(prUrl) → extractJiraKey from title
+8. transitionIssue(key, ID_IN_REVIEW)
 ```
 
----
+## handleReactionAdded Flow
+
+```
+1. Filter: user === MY_SLACK_USER_ID
+2. Filter: reaction === "white_check_mark"
+3. Filter: item.channel === SLACK_REVIEW_CHANNEL
+4. fetchMessage(channel, ts) → get original message text
+5. Strip angle-bracket URL wrapping
+6. Match GitHub PR URL regex
+7. fetchPrData(prUrl) → { title, baseBranch }
+8. extractJiraKey from message text, fallback to PR title
+9. Check baseBranch === "develop" — skip if not
+10. transitionIssue(key, ID_QA_READY) → if false, stop
+11. addComment(key, "Ready for QA testing")
+12. getIssue(key) → if Bug: extractSlackThread(description) → replyToThread
+```
+
+## Slack Signing Verification
+
+```
+basestring = "v0:" + X-Slack-Request-Timestamp + ":" + rawBody
+digest = "v0=" + hmac_sha256(SLACK_SIGNING_SECRET, basestring)
+compare with X-Slack-Signature using timingSafeEqual
+Reject if |now - timestamp| > 300s
+Skip Slack retries (X-Slack-Retry-Num header)
+```
+
+## post-push Hook Logic
+
+```
+1. Get current branch
+2. Skip if branch is HEAD / main / master / develop
+3. Check if remote ref had prior history (git rev-parse refs/remotes/origin/BRANCH@{1})
+4. If no prior history → first push → extract Jira key from commit message or branch name
+5. POST {jiraKey} to $BOT_URL/git/push
+6. Failures are non-fatal (--max-time 5, fallback echo)
+```
+
+## Dry Run Mode
+
+`DRY_RUN=true` → all write operations (transition, comment, Slack reply) post a preview to `SLACK_PREVIEW_CHANNEL` instead. Preview format: `current status → target status`.
+
+## Test Coverage
+
+```
+tests/utils.test.js    — extractJiraKey, extractSlackThread (edge cases, ADF, null)
+tests/github.test.js   — fetchPrData, fetchPrTitle (fetch mock, error handling)
+tests/jira.test.js     — transitionIssue guards, dry run, addComment
+tests/index.test.js    — all HTTP routes via supertest (49 tests total)
+```
+
+Run: `npm test`
 
 ## Slack App Scopes Required
 
@@ -145,17 +110,17 @@ BOT_URL=                # http://localhost:3000 (dev) or https://<app>.railway.a
 | --- | --- |
 | `chat:write` | Post messages in channels bot is member of |
 | `chat:write.public` | Post in public channels without joining |
-| `channels:history` | Read messages to fetch original message on reaction |
+| `channels:history` | Read messages in public channels |
+| `groups:history` | Read messages in private channels |
 | `reactions:read` | Receive `reaction_added` events |
-
----
 
 ## Deployment Checklist (Railway)
 
-1. Set all env vars including new Slack ones
-2. Deploy — get public URL
-3. In Slack App → Event Subscriptions → set Request URL to `https://<app>.railway.app/slack/events`
-4. Slack will send `url_verification` — bot must respond with `{ challenge }`
-5. Subscribe to: `message.channels`, `reaction_added`
-6. Install git hook into your work repos via symlink
-7. Set `BOT_URL=https://<app>.railway.app` in prod env (git hook posts there)
+1. Set all env vars in Railway Variables tab
+2. Deploy → get public URL
+3. Slack App → Event Subscriptions → Request URL → `https://<app>.railway.app/slack/events`
+4. Subscribe bot events: `message.channels`, `message.groups`, `reaction_added`
+5. Reinstall app to workspace after scope changes
+6. Install git hook: `ln -sf $(pwd)/hooks/post-push /path/to/repo/.git/hooks/post-push`
+7. Set `BOT_URL=https://<app>.railway.app` in prod `.env`
+8. Set `DRY_RUN=false` when ready to go live
