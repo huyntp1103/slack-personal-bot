@@ -1,13 +1,12 @@
 'use strict';
 
 /**
- * Fetches a GitHub PR title given its URL.
- * Parses owner/repo/number from the URL and calls the GitHub REST API.
+ * Fetches GitHub PR data given its URL.
  *
  * @param {string} prUrl - e.g. https://github.com/Everfit-io/everfit-api/pull/16391
- * @returns {Promise<string|null>} PR title or null on failure
+ * @returns {Promise<{title: string, baseBranch: string}|null>}
  */
-async function fetchPrTitle(prUrl) {
+async function fetchPrData(prUrl) {
   const match = prUrl.match(/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/);
   if (!match) return null;
 
@@ -23,16 +22,25 @@ async function fetchPrTitle(prUrl) {
     });
 
     if (!res.ok) {
-      console.error(`[GitHub] fetchPrTitle failed: ${res.status} ${res.statusText}`);
+      console.error(`[GitHub] fetchPrData failed: ${res.status} ${res.statusText}`);
       return null;
     }
 
     const data = await res.json();
-    return data.title ?? null;
+    return {
+      title: data.title ?? null,
+      baseBranch: data.base?.ref ?? null,
+    };
   } catch (err) {
-    console.error('[GitHub] fetchPrTitle error:', err.message);
+    console.error('[GitHub] fetchPrData error:', err.message);
     return null;
   }
 }
 
-module.exports = { fetchPrTitle };
+// Keep backward-compatible export used in handleReviewMessage
+async function fetchPrTitle(prUrl) {
+  const pr = await fetchPrData(prUrl);
+  return pr?.title ?? null;
+}
+
+module.exports = { fetchPrData, fetchPrTitle };

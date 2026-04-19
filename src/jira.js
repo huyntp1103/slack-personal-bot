@@ -14,6 +14,15 @@ const TRANSITION_NAMES = {
   [process.env.ID_WILL_NOT_FIX]:'Will Not Fix',
 };
 
+// Defines which status the ticket must currently be in before transitioning.
+// Evaluated lazily so env vars are read at call time, not module load time.
+function requiredCurrentStatus(transitionId) {
+  if (transitionId === process.env.ID_IN_PROGRESS) return 'To Do';
+  if (transitionId === process.env.ID_IN_REVIEW)   return 'In Progress';
+  if (transitionId === process.env.ID_QA_READY)    return 'In Review';
+  return null; // no restriction for other transitions
+}
+
 const client = new Version2Client({
   host: process.env.JIRA_HOST,
   authentication: {
@@ -32,21 +41,43 @@ const client = new Version2Client({
  * @param {string} transitionId
  */
 async function transitionIssue(issueKey, transitionId) {
-  if (!transitionId) return;
+  if (!transitionId) return false;
+
+  const required = requiredCurrentStatus(transitionId);
+  const issue = await client.issues.getIssue({ issueIdOrKey: issueKey });
+  const currentStatus = issue.fields.status.name;
+
+  if (required && currentStatus !== required) {
+    console.log(`[Jira] Skipping ${issueKey}: status is "${currentStatus}", expected "${required}"`);
+    return false;
+  }
+
+  // Block "To Do → In Progress" for tickets in the backlog sprint (id 249)
+  if (transitionId === process.env.ID_IN_PROGRESS) {
+    const sprints = issue.fields.customfield_10010 || [];
+    const inBacklog = sprints.some(s => s.id === 249);
+    if (inBacklog) {
+      console.log(`[Jira] Skipping ${issueKey}: ticket is in Active Sprint Backlog (249)`);
+      return false;
+    }
+  }
+
+  const statusName = TRANSITION_NAMES[transitionId] || `id ${transitionId}`;
+
   if (process.env.DRY_RUN === 'true') {
-    const statusName = TRANSITION_NAMES[transitionId] || `id ${transitionId}`;
-    await preview(`🔔 *[PREVIEW] Jira transition*\nTicket: *${issueKey}*\nAction: Change status → *${statusName}*`);
-    return;
+    await preview(`🔔 *[PREVIEW] Jira transition*\nTicket: *${issueKey}*\nAction: *${currentStatus}* → *${statusName}*`);
+    return true;
   }
   try {
     await client.issues.doTransition({
       issueIdOrKey: issueKey,
       transition: { id: transitionId },
     });
-    const statusName = TRANSITION_NAMES[transitionId] || `id ${transitionId}`;
     console.log(`[Jira] Transitioned ${issueKey} → ${statusName}`);
+    return true;
   } catch (err) {
     console.error(`[Jira] transitionIssue(${issueKey}, ${transitionId}) failed:`, err.message);
+    return false;
   }
 }
 

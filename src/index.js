@@ -7,7 +7,7 @@ const express = require('express');
 const { transitionIssue, addComment, getIssue } = require('./jira');
 const { replyToThread, fetchMessage } = require('./slack');
 const { extractJiraKey, extractSlackThread } = require('./utils');
-const { fetchPrTitle } = require('./github');
+const { fetchPrTitle, fetchPrData } = require('./github');
 
 const app = express();
 
@@ -125,12 +125,16 @@ async function handleReactionAdded(event) {
   const prUrlMatch = cleanText.match(/https:\/\/github\.com\/[^|\s]+\/pull\/\d+/);
 
   let jiraKey = extractJiraKey(text);
+  let baseBranch = null;
 
-  if (!jiraKey && prUrlMatch) {
-    const prTitle = await fetchPrTitle(prUrlMatch[0]);
-    if (prTitle) {
-      jiraKey = extractJiraKey(prTitle);
-      console.log(`[GitHub] PR title: "${prTitle}"`);
+  if (prUrlMatch) {
+    const prData = await fetchPrData(prUrlMatch[0]);
+    if (prData) {
+      baseBranch = prData.baseBranch;
+      if (!jiraKey) {
+        jiraKey = extractJiraKey(prData.title);
+        console.log(`[GitHub] PR title: "${prData.title}"`);
+      }
     }
   }
 
@@ -138,11 +142,19 @@ async function handleReactionAdded(event) {
     console.log('[Slack] reaction_added: no Jira key found in message or PR title');
     return;
   }
+
+  if (baseBranch !== 'develop') {
+    console.log(`[Slack] reaction_added: skipping ${jiraKey} — base branch is "${baseBranch}", expected "develop"`);
+    return;
+  }
+
   const prUrl = prUrlMatch ? prUrlMatch[0].replace(/\|.*$/, '') : '';
 
   // console.log(`[Slack] ✅ reaction detected — transitioning ${jiraKey} → QA Ready`);
 
-  await transitionIssue(jiraKey, process.env.ID_QA_READY);
+  const transitioned = await transitionIssue(jiraKey, process.env.ID_QA_READY);
+  if (!transitioned) return;
+
   await addComment(jiraKey, 'Ready for QA testing');
 
   try {
