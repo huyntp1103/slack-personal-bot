@@ -5,7 +5,6 @@ jest.mock('jira.js');
 jest.mock('../src/slack', () => ({ preview: jest.fn() }));
 
 const { Version2Client } = require('jira.js');
-const { preview } = require('../src/slack');
 
 const mockGetIssue = jest.fn();
 const mockDoTransition = jest.fn();
@@ -39,7 +38,6 @@ function mockIssue({ status = 'To Do', sprints = [], issueType = 'Task' } = {}) 
 
 beforeEach(() => {
   jest.clearAllMocks();
-  delete process.env.DRY_RUN;
   mockDoTransition.mockResolvedValue({});
   mockAddComment.mockResolvedValue({});
 });
@@ -103,24 +101,6 @@ describe('transitionIssue — backlog sprint guard', () => {
   });
 });
 
-describe('transitionIssue — dry run', () => {
-  beforeEach(() => { process.env.DRY_RUN = 'true'; });
-
-  test('posts preview and returns true without calling doTransition', async () => {
-    mockIssue({ status: 'To Do' });
-    const result = await transitionIssue('UP-1', '21');
-    expect(mockDoTransition).not.toHaveBeenCalled();
-    expect(preview).toHaveBeenCalledWith(expect.stringContaining('In Progress'));
-    expect(result).toBe(true);
-  });
-
-  test('preview message shows current status → target status', async () => {
-    mockIssue({ status: 'To Do' });
-    await transitionIssue('UP-1', '21');
-    expect(preview).toHaveBeenCalledWith(expect.stringMatching(/To Do.*In Progress/));
-  });
-});
-
 describe('transitionIssue — API failure', () => {
   test('returns false when doTransition throws', async () => {
     mockIssue({ status: 'To Do' });
@@ -139,10 +119,4 @@ describe('addComment', () => {
     });
   });
 
-  test('posts preview in dry run mode', async () => {
-    process.env.DRY_RUN = 'true';
-    await addComment('UP-1', 'Ready for QA testing');
-    expect(mockAddComment).not.toHaveBeenCalled();
-    expect(preview).toHaveBeenCalledWith(expect.stringContaining('Ready for QA testing'));
-  });
 });

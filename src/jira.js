@@ -64,10 +64,8 @@ async function transitionIssue(issueKey, transitionId) {
 
   const statusName = TRANSITION_NAMES[transitionId] || `id ${transitionId}`;
 
-  if (process.env.DRY_RUN === 'true') {
-    await preview(`🔔 *[PREVIEW] Jira transition*\nTicket: *${issueKey}*\nAction: *${currentStatus}* → *${statusName}*`);
-    return true;
-  }
+  await preview(`🔔 *Jira transition*\nTicket: \`${issueKey}\`\nAction: \`${currentStatus}\` → \`${statusName}\``);
+
   try {
     await client.issues.doTransition({
       issueIdOrKey: issueKey,
@@ -88,10 +86,8 @@ async function transitionIssue(issueKey, transitionId) {
  * @param {string} text
  */
 async function addComment(issueKey, text) {
-  if (process.env.DRY_RUN === 'true') {
-    await preview(`🔔 *[PREVIEW] Jira comment*\nTicket: *${issueKey}*\nComment: ${text}`);
-    return;
-  }
+  await preview(`🔔 *Jira comment*\nTicket: \`${issueKey}\`\nComment: ${text}`);
+
   try {
     await client.issueComments.addComment({
       issueIdOrKey: issueKey,

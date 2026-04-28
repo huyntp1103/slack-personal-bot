@@ -13,10 +13,10 @@ const slack = new WebClient(process.env.SLACK_BOT_TOKEN);
  * @param {string} text
  */
 async function replyToThread(channel, ts, text) {
-  if (process.env.DRY_RUN === 'true') {
-    await preview(`🔔 *[PREVIEW] Slack thread reply*\nChannel: \`${channel}\` Thread: \`${ts}\`\nMessage: ${text}`);
-    return;
-  }
+  await preview(`🔔 *Slack thread reply*\nChannel: \`${channel}\` Thread: \`${ts}\`\nMessage: ${text}`);
+
+  if (process.env.DRY_RUN === 'true') return;
+
   try {
     await slack.chat.postMessage({ channel, thread_ts: ts, text });
     console.log(`[Slack] Replied to thread ${ts} in ${channel}`);
@@ -49,21 +49,21 @@ async function fetchMessage(channel, ts) {
 }
 
 /**
- * Posts a dry-run preview message to SLACK_PREVIEW_CHANNEL.
- * Only active when DRY_RUN=true.
+ * Posts a preview message to terminal and SLACK_PREVIEW_CHANNEL (if configured).
+ * Always runs regardless of DRY_RUN, so you can audit actions before/while they execute.
  *
  * @param {string} text
  */
 async function preview(text) {
+  console.log(`[PREVIEW] ${text}`);
+
   const channel = process.env.SLACK_PREVIEW_CHANNEL;
-  if (!channel) {
-    console.log(`[DRY RUN] ${text}`);
-    return;
-  }
+  if (!channel) return;
+
   try {
     await slack.chat.postMessage({ channel, text });
   } catch (err) {
-    console.log(`[DRY RUN] preview post failed:`, err.message);
+    console.log(`[PREVIEW] post failed:`, err.message);
   }
 }
 

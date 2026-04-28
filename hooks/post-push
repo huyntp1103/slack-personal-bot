@@ -13,7 +13,7 @@ BOT_URL="${BOT_URL:-http://localhost:3000}"
 BRANCH=$(git rev-parse --abbrev-ref HEAD)
 
 # Skip detached HEAD or main/master/develop pushes
-if [[ "$BRANCH" == "HEAD" || "$BRANCH" == "main" || "$BRANCH" == "master" || "$BRANCH" == "develop" ]]; then
+if [[ "$BRANCH" == "HEAD" || "$BRANCH" == "main" || "$BRANCH" == "master" || "$BRANCH" == "develop" || "$BRANCH" == "releasing_staging" ]]; then
   exit 0
 fi
 
