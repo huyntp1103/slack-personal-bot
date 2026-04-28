@@ -7,7 +7,10 @@ const express = require('express');
 const { transitionIssue, addComment, getIssue } = require('./jira');
 const { replyToThread, fetchMessage } = require('./slack');
 const { extractJiraKey, extractSlackThread } = require('./utils');
-const { fetchPrTitle, fetchPrData } = require('./github');
+const { fetchPrTitle, fetchPrData, fetchPrCommits } = require('./github');
+
+const ALLOWED_BASE_BRANCHES = ['develop', 'releasing_staging', 'main', 'master'];
+const NOTIFY_BASE_BRANCHES = ['develop', 'releasing_staging'];
 
 const app = express();
 
@@ -103,7 +106,7 @@ async function handleReviewMessage(event) {
 }
 
 /**
- * ✅ reaction on my message in #backend-review-code → Jira: QA Ready + Slack thread
+ * ✅ reaction on my message in #backend-review-code → Jira: QA Ready (+ comment + Slack thread for develop/releasing_staging)
  */
 async function handleReactionAdded(event) {
   if (event.user !== process.env.MY_SLACK_USER_ID) return;
@@ -121,41 +124,72 @@ async function handleReactionAdded(event) {
   const text = message.text || '';
   const cleanText = text.replace(/<([^>]+)>/g, '$1');
   const prUrlMatch = cleanText.match(/https:\/\/github\.com\/[^|\s]+\/pull\/\d+/);
+  if (!prUrlMatch) {
+    console.log('[Slack] reaction_added: no PR URL in message');
+    return;
+  }
 
-  let jiraKey = extractJiraKey(text);
-  let baseBranch = null;
+  const prUrl = prUrlMatch[0];
+  const prData = await fetchPrData(prUrl);
+  if (!prData) {
+    console.log('[Slack] reaction_added: could not fetch PR data');
+    return;
+  }
 
-  if (prUrlMatch) {
-    const prData = await fetchPrData(prUrlMatch[0]);
-    if (prData) {
-      baseBranch = prData.baseBranch;
-      if (!jiraKey) {
-        jiraKey = extractJiraKey(prData.title);
-        console.log(`[GitHub] PR title: "${prData.title}"`);
-      }
+  const baseBranch = prData.baseBranch;
+  if (!ALLOWED_BASE_BRANCHES.includes(baseBranch)) {
+    console.log(`[Slack] reaction_added: skipping — base branch "${baseBranch}" not in ${ALLOWED_BASE_BRANCHES.join(', ')}`);
+    return;
+  }
+
+  // For releasing_staging: PR contains commits from many people. Filter to mine,
+  // then dedupe by Jira key and process each ticket.
+  let jiraKeys;
+  if (baseBranch === 'releasing_staging') {
+    const commits = await fetchPrCommits(prUrl);
+    const myUsername = process.env.MY_GITHUB_USERNAME;
+    const myCommits = commits.filter(c => c.authorLogin === myUsername);
+    jiraKeys = [...new Set(myCommits.map(c => extractJiraKey(c.message)).filter(Boolean))];
+
+    if (jiraKeys.length === 0) {
+      console.log(`[Slack] reaction_added: no Jira keys found in my commits for ${prUrl}`);
+      return;
     }
+    console.log(`[Slack] releasing_staging PR — processing ${jiraKeys.length} ticket(s): ${jiraKeys.join(', ')}`);
+  } else {
+    let jiraKey = extractJiraKey(text);
+    if (!jiraKey) {
+      jiraKey = extractJiraKey(prData.title);
+      console.log(`[GitHub] PR title: "${prData.title}"`);
+    }
+    if (!jiraKey) {
+      console.log('[Slack] reaction_added: no Jira key found in message or PR title');
+      return;
+    }
+    jiraKeys = [jiraKey];
   }
 
-  if (!jiraKey) {
-    console.log('[Slack] reaction_added: no Jira key found in message or PR title');
-    return;
+  for (const jiraKey of jiraKeys) {
+    await processQaReadyTicket(jiraKey, baseBranch);
   }
+}
 
-  if (baseBranch !== 'develop') {
-    console.log(`[Slack] reaction_added: skipping ${jiraKey} — base branch is "${baseBranch}", expected "develop"`);
-    return;
-  }
-
-  console.log(`[Slack] ✅ reaction detected — transitioning ${jiraKey} → QA Ready`);
+async function processQaReadyTicket(jiraKey, baseBranch) {
+  console.log(`[Slack] ✅ transitioning ${jiraKey} → QA Ready (base: ${baseBranch})`);
 
   const transitioned = await transitionIssue(jiraKey, process.env.ID_QA_READY);
   if (!transitioned) return;
+
+  // For main/master we only transition — no comment, no Slack reply
+  if (!NOTIFY_BASE_BRANCHES.includes(baseBranch)) return;
 
   const DELAY_MS = Number(process.env.QA_NOTIFY_DELAY_MINUTES ?? 15) * 60 * 1000;
   console.log(`[Slack] ⏳ waiting ${process.env.QA_NOTIFY_DELAY_MINUTES ?? 15} minutes before notifying QA for ${jiraKey}...`);
   await new Promise(resolve => setTimeout(resolve, DELAY_MS));
 
-  await addComment(jiraKey, 'Ready for QA testing');
+  const env = baseBranch === 'releasing_staging' ? 'STAGING' : 'DEV';
+
+  await addComment(jiraKey, `Ready for QA testing on ${env}`);
 
   try {
     const issue = await getIssue(jiraKey);
@@ -167,14 +201,14 @@ async function handleReactionAdded(event) {
         await replyToThread(
           thread.channel,
           thread.ts,
-          `Dạ card này test được rồi ạ`
+          `Dạ card này test được ở ${env} rồi ạ`
         );
       } else {
         console.log(`[Slack] Bug ${jiraKey} has no Slack thread link in Jira description`);
       }
     }
   } catch (err) {
-    console.log(`[Slack] handleReactionAdded post-transition error (${jiraKey}):`, err.message);
+    console.log(`[Slack] processQaReadyTicket post-transition error (${jiraKey}):`, err.message);
   }
 }
 

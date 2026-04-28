@@ -43,4 +43,41 @@ async function fetchPrTitle(prUrl) {
   return pr?.title ?? null;
 }
 
-module.exports = { fetchPrData, fetchPrTitle };
+/**
+ * Fetches all commits on a PR.
+ *
+ * @param {string} prUrl
+ * @returns {Promise<Array<{message: string, authorLogin: string|null}>>}
+ */
+async function fetchPrCommits(prUrl) {
+  const match = prUrl.match(/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/);
+  if (!match) return [];
+
+  const [, owner, repo, number] = match;
+  const apiUrl = `https://api.github.com/repos/${owner}/${repo}/pulls/${number}/commits?per_page=100`;
+
+  try {
+    const res = await fetch(apiUrl, {
+      headers: {
+        Authorization: `Bearer ${process.env.GITHUB_TOKEN}`,
+        Accept: 'application/vnd.github+json',
+      },
+    });
+
+    if (!res.ok) {
+      console.log(`[GitHub] fetchPrCommits failed: ${res.status} ${res.statusText}`);
+      return [];
+    }
+
+    const data = await res.json();
+    return data.map(c => ({
+      message: c.commit?.message ?? '',
+      authorLogin: c.author?.login ?? null,
+    }));
+  } catch (err) {
+    console.log('[GitHub] fetchPrCommits error:', err.message);
+    return [];
+  }
+}
+
+module.exports = { fetchPrData, fetchPrTitle, fetchPrCommits };

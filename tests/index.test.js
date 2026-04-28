@@ -13,11 +13,12 @@ jest.mock('../src/slack', () => ({
 jest.mock('../src/github', () => ({
   fetchPrData: jest.fn(),
   fetchPrTitle: jest.fn(),
+  fetchPrCommits: jest.fn(),
 }));
 
 const { transitionIssue, addComment, getIssue } = require('../src/jira');
 const { fetchMessage } = require('../src/slack');
-const { fetchPrData, fetchPrTitle } = require('../src/github');
+const { fetchPrData, fetchPrTitle, fetchPrCommits } = require('../src/github');
 
 process.env.MY_SLACK_USER_ID = 'U093ZDNQJF3';
 process.env.SLACK_REVIEW_CHANNEL = 'C05F65TBB9P';
@@ -25,6 +26,7 @@ process.env.ID_IN_REVIEW = '41';
 process.env.ID_QA_READY = '51';
 process.env.SLACK_SIGNING_SECRET = '';
 process.env.QA_NOTIFY_DELAY_MINUTES = '15';
+process.env.MY_GITHUB_USERNAME = 'huynguyen-everfit';
 
 const request = require('supertest');
 const app = require('../src/index');
@@ -36,6 +38,7 @@ beforeEach(() => {
   getIssue.mockResolvedValue({ fields: { issuetype: { name: 'Task' }, description: null } });
   fetchPrTitle.mockResolvedValue('feat: UP-69726 some feature');
   fetchPrData.mockResolvedValue({ title: 'feat: UP-69726 some feature', baseBranch: 'develop' });
+  fetchPrCommits.mockResolvedValue([]);
   fetchMessage.mockResolvedValue({
     text: '<https://github.com/Everfit-io/everfit-api/pull/16391>',
   });
@@ -142,9 +145,9 @@ describe('handleReactionAdded', () => {
     expect(transitionIssue).toHaveBeenCalledWith('UP-69726', '51');
   });
 
-  test('adds comment after delay', async () => {
+  test('adds comment with DEV env after delay (develop base)', async () => {
     await sendReaction();
-    expect(addComment).toHaveBeenCalled();
+    expect(addComment).toHaveBeenCalledWith('UP-69726', 'Ready for QA testing on DEV');
   });
 
   test('ignores reactions from other users', async () => {
@@ -157,8 +160,51 @@ describe('handleReactionAdded', () => {
     expect(transitionIssue).not.toHaveBeenCalled();
   });
 
-  test('skips if base branch is not develop', async () => {
+  test('skips if base branch is not in allowlist', async () => {
+    fetchPrData.mockResolvedValue({ title: 'feat: UP-69726 feature', baseBranch: 'feature/foo' });
+    await sendReaction();
+    expect(transitionIssue).not.toHaveBeenCalled();
+  });
+
+  test('transitions for base branch main but does not comment or reply', async () => {
+    const { replyToThread } = require('../src/slack');
     fetchPrData.mockResolvedValue({ title: 'feat: UP-69726 feature', baseBranch: 'main' });
+    await sendReaction();
+    expect(transitionIssue).toHaveBeenCalledWith('UP-69726', '51');
+    expect(addComment).not.toHaveBeenCalled();
+    expect(replyToThread).not.toHaveBeenCalled();
+  });
+
+  test('transitions for base branch master but does not comment or reply', async () => {
+    fetchPrData.mockResolvedValue({ title: 'feat: UP-69726 feature', baseBranch: 'master' });
+    await sendReaction();
+    expect(transitionIssue).toHaveBeenCalledWith('UP-69726', '51');
+    expect(addComment).not.toHaveBeenCalled();
+  });
+
+  test('releasing_staging: filters commits by my username, dedupes by Jira key, processes each ticket with STAGING env', async () => {
+    fetchPrData.mockResolvedValue({ title: 'release', baseBranch: 'releasing_staging' });
+    fetchPrCommits.mockResolvedValue([
+      { message: 'feat: UP-100 thing', authorLogin: 'huynguyen-everfit' },
+      { message: 'fix: UP-100 follow-up', authorLogin: 'huynguyen-everfit' }, // duplicate key
+      { message: 'feat: UP-200 other', authorLogin: 'huynguyen-everfit' },
+      { message: 'chore: UP-999 from teammate', authorLogin: 'someone-else' }, // filtered out
+    ]);
+    await sendReaction();
+    expect(transitionIssue).toHaveBeenCalledWith('UP-100', '51');
+    expect(transitionIssue).toHaveBeenCalledWith('UP-200', '51');
+    expect(transitionIssue).not.toHaveBeenCalledWith('UP-999', '51');
+    expect(transitionIssue).toHaveBeenCalledTimes(2);
+    expect(addComment).toHaveBeenCalledTimes(2);
+    expect(addComment).toHaveBeenCalledWith('UP-100', 'Ready for QA testing on STAGING');
+    expect(addComment).toHaveBeenCalledWith('UP-200', 'Ready for QA testing on STAGING');
+  });
+
+  test('releasing_staging: skips if no commits authored by me have a Jira key', async () => {
+    fetchPrData.mockResolvedValue({ title: 'release', baseBranch: 'releasing_staging' });
+    fetchPrCommits.mockResolvedValue([
+      { message: 'chore: UP-1 from someone else', authorLogin: 'someone-else' },
+    ]);
     await sendReaction();
     expect(transitionIssue).not.toHaveBeenCalled();
   });
@@ -169,7 +215,7 @@ describe('handleReactionAdded', () => {
     expect(addComment).not.toHaveBeenCalled();
   });
 
-  test('replies to Slack thread for Bug tickets after delay', async () => {
+  test('replies to Slack thread for Bug tickets with DEV env (develop base)', async () => {
     const { replyToThread } = require('../src/slack');
     replyToThread.mockResolvedValue(undefined);
     getIssue.mockResolvedValue({
@@ -179,7 +225,32 @@ describe('handleReactionAdded', () => {
       },
     });
     await sendReaction();
-    expect(replyToThread).toHaveBeenCalledWith('C0ABC1234', '1712345678.901234', expect.any(String));
+    expect(replyToThread).toHaveBeenCalledWith(
+      'C0ABC1234',
+      '1712345678.901234',
+      'Dạ card này test được ở DEV rồi ạ'
+    );
+  });
+
+  test('replies to Slack thread for Bug tickets with STAGING env (releasing_staging base)', async () => {
+    const { replyToThread } = require('../src/slack');
+    replyToThread.mockResolvedValue(undefined);
+    fetchPrData.mockResolvedValue({ title: 'release', baseBranch: 'releasing_staging' });
+    fetchPrCommits.mockResolvedValue([
+      { message: 'feat: UP-100 thing', authorLogin: 'huynguyen-everfit' },
+    ]);
+    getIssue.mockResolvedValue({
+      fields: {
+        issuetype: { name: 'Bug' },
+        description: 'https://workspace.slack.com/archives/C0ABC1234/p1712345678901234',
+      },
+    });
+    await sendReaction();
+    expect(replyToThread).toHaveBeenCalledWith(
+      'C0ABC1234',
+      '1712345678.901234',
+      'Dạ card này test được ở STAGING rồi ạ'
+    );
   });
 
   test('skips Slack reply for non-Bug tickets', async () => {

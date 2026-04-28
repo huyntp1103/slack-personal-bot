@@ -19,7 +19,7 @@ Personal automation bot that eliminates manual Jira transitions and Slack notifi
 │   ├── index.js          # Express server — routes for Slack events + git hook
 │   ├── jira.js           # Jira transition + comment helpers
 │   ├── slack.js          # Slack postMessage + fetchMessage helpers
-│   ├── github.js         # GitHub PR data fetcher (title, base branch)
+│   ├── github.js         # GitHub PR data fetcher (title, base branch, commits)
 │   └── utils.js          # extractJiraKey(), extractSlackThread()
 ├── hooks/
 │   └── post-push         # Local git hook script (symlinked into repos)
@@ -39,7 +39,7 @@ Personal automation bot that eliminates manual Jira transitions and Slack notifi
 | --- | --- | --- | --- |
 | `git push` (new branch) | Local git `post-push` hook | Branch has no upstream yet | → In Progress |
 | New message in `#backend-review-code` | Slack `message` event | Root message (not reply), from `MY_SLACK_USER_ID`, contains a PR link | → In Review |
-| ✅ reaction on message in `#backend-review-code` | Slack `reaction_added` event | Reaction by `MY_SLACK_USER_ID`, PR base branch is `develop` | → QA Ready + comment + Slack thread reply (if Bug) |
+| ✅ reaction on message in `#backend-review-code` | Slack `reaction_added` event | Reaction by `MY_SLACK_USER_ID`, PR base branch in `develop`, `releasing_staging`, `main`, `master` | → QA Ready (always) + comment + Slack thread reply (only when base is `develop` or `releasing_staging`) |
 
 ## Jira Key Format
 
@@ -57,7 +57,7 @@ Jira base URL: `https://everfit.atlassian.net/browse/<KEY>`
 | --- | --- | --- |
 | In Progress | To Do | Ticket must NOT be in sprint id `249` (Active Sprint Backlog) |
 | In Review | In Progress | — |
-| QA Ready | In Review | PR base branch must be `develop` |
+| QA Ready | In Review | PR base branch must be in `develop`, `releasing_staging`, `main`, `master` |
 
 `transitionIssue()` returns `false` when skipped — callers (comment, Slack reply) must check the return value before proceeding.
 
@@ -75,15 +75,20 @@ Jira base URL: `https://everfit.atlassian.net/browse/<KEY>`
   - `event.user === MY_SLACK_USER_ID`
   - `event.item.type === 'message'`
   - Channel: `SLACK_REVIEW_CHANNEL`
-  - PR base branch must be `develop`
+  - PR base branch must be one of `develop`, `releasing_staging`, `main`, `master`
+  - **`releasing_staging` PRs**: contain commits from many people, so the bot fetches the PR commit list, filters to commits authored by `MY_GITHUB_USERNAME`, dedupes by Jira key, and processes each ticket independently
+  - **For all other branches**: single ticket extracted from the Slack message text or PR title
+  - **Notification scope**: comment + Slack thread reply only fire for `develop` and `releasing_staging`. For `main`/`master`, the bot transitions the ticket and stops.
 
 ## Slack URL Verification
 
 Slack sends a `url_verification` challenge on first setup. The `/slack/events` endpoint responds with `{ challenge }`.
 
-## Dry Run Mode
+## Preview & Dry Run Mode
 
-Set `DRY_RUN=true` to preview all actions without touching Jira or Slack. Preview messages are posted to `SLACK_PREVIEW_CHANNEL` showing `current status → target status`.
+Every Jira transition, Jira comment, and Slack thread reply emits a preview line via `preview()` — printed to the terminal as `[PREVIEW] ...` and (if `SLACK_PREVIEW_CHANNEL` is set) posted to that channel. Previews always run regardless of `DRY_RUN`.
+
+`DRY_RUN=true` only gates the **Slack thread reply** (`replyToThread`) — when on, the bot still previews the reply but does not post it to the real thread. Jira transitions and comments always execute.
 
 ## Environment Variables
 
@@ -98,19 +103,26 @@ Set `DRY_RUN=true` to preview all actions without touching Jira or Slack. Previe
 | `SLACK_REVIEW_CHANNEL` | Channel ID for `#backend-review-code` |
 | `MY_GITHUB_USERNAME` | Your GitHub username |
 | `GITHUB_TOKEN` | Personal access token (repo scope) for PR API |
+| `ID_TO_DO` | Jira transition ID for "To Do" (optional, used in `TRANSITION_NAMES` map) |
 | `ID_IN_PROGRESS` | Jira transition ID for "In Progress" |
 | `ID_IN_REVIEW` | Jira transition ID for "In Review" |
 | `ID_QA_READY` | Jira transition ID for "QA Ready" |
+| `ID_QA_FAILED` | Jira transition ID for "QA Failed" (optional) |
+| `ID_IN_TEST` | Jira transition ID for "In Test" (optional) |
+| `ID_QA_SUCCESS` | Jira transition ID for "QA Success" (optional) |
+| `ID_WILL_NOT_FIX` | Jira transition ID for "Will Not Fix" (optional) |
+| `QA_NOTIFY_DELAY_MINUTES` | Minutes to wait after QA Ready before commenting/replying (default: 15) |
 | `BOT_URL` | Deployed bot URL (used by git hook) |
-| `DRY_RUN` | Set `true` to preview actions without executing |
-| `SLACK_PREVIEW_CHANNEL` | Channel ID for dry-run previews |
+| `DRY_RUN` | Set `true` to suppress real Slack thread replies (Jira mutations still run) |
+| `SLACK_PREVIEW_CHANNEL` | Channel ID where every action preview is posted (always active when set) |
 | `PORT` | Server port (default: 3000) |
 
 ## Key Behaviors
 
 - **Silent mode**: All Slack filters check `MY_SLACK_USER_ID` — other people's messages/reactions are ignored.
 - **Jira key extraction**: Regex `/[A-Z]+-\d+/` on message text first, then GitHub PR title as fallback.
-- **Slack thread reply**: For Bug-type tickets on merge, extracts Slack archive URL from Jira description (`archives/CXXX/pTIMESTAMP`) and replies to that thread.
+- **Slack thread reply**: For Bug-type tickets after a `develop`/`releasing_staging` PR is approved, extracts Slack archive URL from Jira description (`archives/CXXX/pTIMESTAMP`) and replies to that thread. Skipped for `main`/`master` PRs.
+- **QA notification delay**: After transitioning to QA Ready, the bot waits `QA_NOTIFY_DELAY_MINUTES` (default 15) before posting the Jira comment and Slack thread reply.
 - **Root message filter**: `message` events only trigger if `thread_ts` is absent or equals `ts`.
 - **Transition guards**: Wrong current status or blocked sprint → skip silently, no comment/Slack reply.
 - **All Jira actions appear as your manual work** (personal token, not a bot account).

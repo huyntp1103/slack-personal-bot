@@ -1,6 +1,6 @@
 'use strict';
 
-const { fetchPrData, fetchPrTitle } = require('../src/github');
+const { fetchPrData, fetchPrTitle, fetchPrCommits } = require('../src/github');
 
 const PR_URL = 'https://github.com/Everfit-io/everfit-api/pull/16391';
 
@@ -77,5 +77,51 @@ describe('fetchPrTitle', () => {
     global.fetch.mockResolvedValue({ ok: false, status: 403, statusText: 'Forbidden' });
     const title = await fetchPrTitle(PR_URL);
     expect(title).toBeNull();
+  });
+});
+
+describe('fetchPrCommits', () => {
+  test('returns array of {message, authorLogin}', async () => {
+    global.fetch.mockResolvedValue({
+      ok: true,
+      json: async () => ([
+        { commit: { message: 'feat: UP-1 thing' }, author: { login: 'me' } },
+        { commit: { message: 'fix: UP-2 other' }, author: { login: 'teammate' } },
+      ]),
+    });
+
+    const commits = await fetchPrCommits(PR_URL);
+    expect(commits).toEqual([
+      { message: 'feat: UP-1 thing', authorLogin: 'me' },
+      { message: 'fix: UP-2 other', authorLogin: 'teammate' },
+    ]);
+  });
+
+  test('handles missing author (returns null login)', async () => {
+    global.fetch.mockResolvedValue({
+      ok: true,
+      json: async () => ([{ commit: { message: 'orphan commit' }, author: null }]),
+    });
+
+    const commits = await fetchPrCommits(PR_URL);
+    expect(commits).toEqual([{ message: 'orphan commit', authorLogin: null }]);
+  });
+
+  test('returns [] for invalid URL', async () => {
+    const commits = await fetchPrCommits('not-a-pr-url');
+    expect(commits).toEqual([]);
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  test('returns [] on non-ok response', async () => {
+    global.fetch.mockResolvedValue({ ok: false, status: 404, statusText: 'Not Found' });
+    const commits = await fetchPrCommits(PR_URL);
+    expect(commits).toEqual([]);
+  });
+
+  test('returns [] on network error', async () => {
+    global.fetch.mockRejectedValue(new Error('boom'));
+    const commits = await fetchPrCommits(PR_URL);
+    expect(commits).toEqual([]);
   });
 });

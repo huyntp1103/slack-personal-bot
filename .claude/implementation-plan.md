@@ -17,7 +17,7 @@ Slack #backend-review-code (✅ reaction added) ──────► POST /slac
 | `src/index.js` | Express server, route handlers, Slack signature verification |
 | `src/jira.js` | `transitionIssue`, `addComment`, `getIssue` |
 | `src/slack.js` | `replyToThread`, `fetchMessage`, `preview` |
-| `src/github.js` | `fetchPrData` (title + base branch), `fetchPrTitle` |
+| `src/github.js` | `fetchPrData` (title + base branch), `fetchPrTitle`, `fetchPrCommits` (commit messages + author logins) |
 | `src/utils.js` | `extractJiraKey`, `extractSlackThread` |
 | `hooks/post-push` | Bash git hook — detects first push, calls `/git/push` |
 
@@ -31,10 +31,12 @@ Slack #backend-review-code (✅ reaction added) ──────► POST /slac
    - → QA Ready     requires current = "In Review"
    - other targets: no restriction
 3. If → In Progress: check customfield_10010 (sprint array) — block if any sprint.id === 249
-4. If DRY_RUN=true: post preview to SLACK_PREVIEW_CHANNEL, return true
+4. Emit preview via preview() — terminal log + SLACK_PREVIEW_CHANNEL post
 5. Call doTransition
 6. Return true on success, false on skip or error
 ```
+
+`addComment` works the same way — emits a preview, then performs the Jira call. Both always execute the real Jira mutation regardless of `DRY_RUN`. Only `replyToThread` is gated by `DRY_RUN=true` (preview still emits, real Slack post is suppressed).
 
 Callers check the return value — `addComment` and `replyToThread` are only called if `transitionIssue` returns `true`.
 
@@ -58,14 +60,20 @@ Callers check the return value — `addComment` and `replyToThread` are only cal
 2. Filter: reaction === "white_check_mark"
 3. Filter: item.channel === SLACK_REVIEW_CHANNEL
 4. fetchMessage(channel, ts) → get original message text
-5. Strip angle-bracket URL wrapping
-6. Match GitHub PR URL regex
-7. fetchPrData(prUrl) → { title, baseBranch }
-8. extractJiraKey from message text, fallback to PR title
-9. Check baseBranch === "develop" — skip if not
-10. transitionIssue(key, ID_QA_READY) → if false, stop
-11. addComment(key, "Ready for QA testing")
-12. getIssue(key) → if Bug: extractSlackThread(description) → replyToThread
+5. Strip angle-bracket URL wrapping, match GitHub PR URL regex (else stop)
+6. fetchPrData(prUrl) → { title, baseBranch }
+7. Allow only baseBranch ∈ {develop, releasing_staging, main, master}
+8. Resolve Jira keys to process:
+   - If baseBranch === "releasing_staging":
+       fetchPrCommits(prUrl) → filter by authorLogin === MY_GITHUB_USERNAME
+       → extractJiraKey(message) → unique → array of keys
+   - Else: extractJiraKey(message text) || extractJiraKey(PR title) → single key
+9. For each jiraKey, processQaReadyTicket(jiraKey, baseBranch):
+   a. transitionIssue(key, ID_QA_READY) → if false, return
+   b. If baseBranch ∈ {main, master}: stop here (transition only)
+   c. Wait QA_NOTIFY_DELAY_MINUTES
+   d. addComment(key, "Ready for QA testing")
+   e. getIssue(key) → if Bug: extractSlackThread(description) → replyToThread
 ```
 
 ## Slack Signing Verification
@@ -89,20 +97,22 @@ Skip Slack retries (X-Slack-Retry-Num header)
 6. Failures are non-fatal (--max-time 5, fallback echo)
 ```
 
-## Dry Run Mode
+## Preview & Dry Run Mode
 
-`DRY_RUN=true` → all write operations (transition, comment, Slack reply) post a preview to `SLACK_PREVIEW_CHANNEL` instead. Preview format: `current status → target status`.
+`preview(text)` always logs `[PREVIEW] ...` to terminal and (if `SLACK_PREVIEW_CHANNEL` is set) posts to that channel. It is called unconditionally before each Jira transition, Jira comment, and Slack thread reply.
+
+`DRY_RUN=true` only suppresses the real `chat.postMessage` call inside `replyToThread`. Jira transitions and comments still execute. Preview output is unaffected by `DRY_RUN`.
 
 ## Test Coverage
 
 ```
 tests/utils.test.js    — extractJiraKey, extractSlackThread (edge cases, ADF, null)
-tests/github.test.js   — fetchPrData, fetchPrTitle (fetch mock, error handling)
-tests/jira.test.js     — transitionIssue guards, dry run, addComment
-tests/index.test.js    — all HTTP routes via supertest (49 tests total)
+tests/github.test.js   — fetchPrData, fetchPrTitle, fetchPrCommits (fetch mock, error handling)
+tests/jira.test.js     — transitionIssue guards (status, sprint 249, API failure), addComment
+tests/index.test.js    — all HTTP routes via supertest (handleReviewMessage, handleReactionAdded with branch routing for develop/releasing_staging/main/master, /git/push)
 ```
 
-Run: `npm test`
+Total: 56 tests. Run: `npm test`.
 
 ## Slack App Scopes Required
 
