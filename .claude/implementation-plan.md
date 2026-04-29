@@ -65,8 +65,9 @@ Callers check the return value — `addComment` and `replyToThread` are only cal
 7. Allow only baseBranch ∈ {develop, releasing_staging, main, master}
 8. Resolve Jira keys to process:
    - If baseBranch === "releasing_staging":
-       fetchPrCommits(prUrl) → filter by authorLogin === MY_GITHUB_USERNAME
+       fetchPrCommits(prUrl) → filter by (authorLogin === MY_GITHUB_USERNAME || committerLogin === MY_GITHUB_USERNAME)
        → extractJiraKey(message) → unique → array of keys
+       (committer match catches cherry-picks where you applied someone else's commit)
    - Else: extractJiraKey(message text) || extractJiraKey(PR title) → single key
 9. For each jiraKey, processQaReadyTicket(jiraKey, baseBranch):
    a. transitionIssue(key, ID_QA_READY) → if false, return

@@ -185,10 +185,10 @@ describe('handleReactionAdded', () => {
   test('releasing_staging: filters commits by my username, dedupes by Jira key, processes each ticket with STAGING env', async () => {
     fetchPrData.mockResolvedValue({ title: 'release', baseBranch: 'releasing_staging' });
     fetchPrCommits.mockResolvedValue([
-      { message: 'feat: UP-100 thing', authorLogin: 'huynguyen-everfit' },
-      { message: 'fix: UP-100 follow-up', authorLogin: 'huynguyen-everfit' }, // duplicate key
-      { message: 'feat: UP-200 other', authorLogin: 'huynguyen-everfit' },
-      { message: 'chore: UP-999 from teammate', authorLogin: 'someone-else' }, // filtered out
+      { message: 'feat: UP-100 thing', authorLogin: 'huynguyen-everfit', committerLogin: 'huynguyen-everfit' },
+      { message: 'fix: UP-100 follow-up', authorLogin: 'huynguyen-everfit', committerLogin: 'huynguyen-everfit' }, // duplicate key
+      { message: 'feat: UP-200 other', authorLogin: 'huynguyen-everfit', committerLogin: 'huynguyen-everfit' },
+      { message: 'chore: UP-999 from teammate', authorLogin: 'someone-else', committerLogin: 'someone-else' }, // filtered out
     ]);
     await sendReaction();
     expect(transitionIssue).toHaveBeenCalledWith('UP-100', '51');
@@ -200,10 +200,22 @@ describe('handleReactionAdded', () => {
     expect(addComment).toHaveBeenCalledWith('UP-200', 'Ready for QA testing on STAGING');
   });
 
-  test('releasing_staging: skips if no commits authored by me have a Jira key', async () => {
+  test('releasing_staging: cherry-picked commits (I am committer, not author) are included', async () => {
     fetchPrData.mockResolvedValue({ title: 'release', baseBranch: 'releasing_staging' });
     fetchPrCommits.mockResolvedValue([
-      { message: 'chore: UP-1 from someone else', authorLogin: 'someone-else' },
+      { message: 'fix: UP-300 cherry-picked from teammate', authorLogin: 'teammate', committerLogin: 'huynguyen-everfit' },
+      { message: 'fix: UP-400 not mine at all', authorLogin: 'teammate', committerLogin: 'teammate' },
+    ]);
+    await sendReaction();
+    expect(transitionIssue).toHaveBeenCalledWith('UP-300', '51');
+    expect(transitionIssue).not.toHaveBeenCalledWith('UP-400', '51');
+    expect(addComment).toHaveBeenCalledWith('UP-300', 'Ready for QA testing on STAGING');
+  });
+
+  test('releasing_staging: skips if no commits authored or committed by me have a Jira key', async () => {
+    fetchPrData.mockResolvedValue({ title: 'release', baseBranch: 'releasing_staging' });
+    fetchPrCommits.mockResolvedValue([
+      { message: 'chore: UP-1 from someone else', authorLogin: 'someone-else', committerLogin: 'someone-else' },
     ]);
     await sendReaction();
     expect(transitionIssue).not.toHaveBeenCalled();
@@ -237,7 +249,7 @@ describe('handleReactionAdded', () => {
     replyToThread.mockResolvedValue(undefined);
     fetchPrData.mockResolvedValue({ title: 'release', baseBranch: 'releasing_staging' });
     fetchPrCommits.mockResolvedValue([
-      { message: 'feat: UP-100 thing', authorLogin: 'huynguyen-everfit' },
+      { message: 'feat: UP-100 thing', authorLogin: 'huynguyen-everfit', committerLogin: 'huynguyen-everfit' },
     ]);
     getIssue.mockResolvedValue({
       fields: {

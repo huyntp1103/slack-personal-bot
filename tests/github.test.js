@@ -81,30 +81,30 @@ describe('fetchPrTitle', () => {
 });
 
 describe('fetchPrCommits', () => {
-  test('returns array of {message, authorLogin}', async () => {
+  test('returns array of {message, authorLogin, committerLogin}', async () => {
     global.fetch.mockResolvedValue({
       ok: true,
       json: async () => ([
-        { commit: { message: 'feat: UP-1 thing' }, author: { login: 'me' } },
-        { commit: { message: 'fix: UP-2 other' }, author: { login: 'teammate' } },
+        { commit: { message: 'feat: UP-1 thing' }, author: { login: 'me' }, committer: { login: 'me' } },
+        { commit: { message: 'fix: UP-2 cherry-picked' }, author: { login: 'teammate' }, committer: { login: 'me' } },
       ]),
     });
 
     const commits = await fetchPrCommits(PR_URL);
     expect(commits).toEqual([
-      { message: 'feat: UP-1 thing', authorLogin: 'me' },
-      { message: 'fix: UP-2 other', authorLogin: 'teammate' },
+      { message: 'feat: UP-1 thing', authorLogin: 'me', committerLogin: 'me' },
+      { message: 'fix: UP-2 cherry-picked', authorLogin: 'teammate', committerLogin: 'me' },
     ]);
   });
 
-  test('handles missing author (returns null login)', async () => {
+  test('handles missing author/committer (returns null logins)', async () => {
     global.fetch.mockResolvedValue({
       ok: true,
-      json: async () => ([{ commit: { message: 'orphan commit' }, author: null }]),
+      json: async () => ([{ commit: { message: 'orphan commit' }, author: null, committer: null }]),
     });
 
     const commits = await fetchPrCommits(PR_URL);
-    expect(commits).toEqual([{ message: 'orphan commit', authorLogin: null }]);
+    expect(commits).toEqual([{ message: 'orphan commit', authorLogin: null, committerLogin: null }]);
   });
 
   test('returns [] for invalid URL', async () => {

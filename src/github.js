@@ -47,7 +47,7 @@ async function fetchPrTitle(prUrl) {
  * Fetches all commits on a PR.
  *
  * @param {string} prUrl
- * @returns {Promise<Array<{message: string, authorLogin: string|null}>>}
+ * @returns {Promise<Array<{message: string, authorLogin: string|null, committerLogin: string|null}>>}
  */
 async function fetchPrCommits(prUrl) {
   const match = prUrl.match(/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/);
@@ -73,6 +73,7 @@ async function fetchPrCommits(prUrl) {
     return data.map(c => ({
       message: c.commit?.message ?? '',
       authorLogin: c.author?.login ?? null,
+      committerLogin: c.committer?.login ?? null,
     }));
   } catch (err) {
     console.log('[GitHub] fetchPrCommits error:', err.message);

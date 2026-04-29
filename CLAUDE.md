@@ -76,7 +76,7 @@ Jira base URL: `https://everfit.atlassian.net/browse/<KEY>`
   - `event.item.type === 'message'`
   - Channel: `SLACK_REVIEW_CHANNEL`
   - PR base branch must be one of `develop`, `releasing_staging`, `main`, `master`
-  - **`releasing_staging` PRs**: contain commits from many people, so the bot fetches the PR commit list, filters to commits authored by `MY_GITHUB_USERNAME`, dedupes by Jira key, and processes each ticket independently
+  - **`releasing_staging` PRs**: contain commits from many people, so the bot fetches the PR commit list, filters to commits where `MY_GITHUB_USERNAME` is the **author OR committer** (so cherry-picked commits count too), dedupes by Jira key, and processes each ticket independently
   - **For all other branches**: single ticket extracted from the Slack message text or PR title
   - **Notification scope**: comment + Slack thread reply only fire for `develop` and `releasing_staging`. For `main`/`master`, the bot transitions the ticket and stops.
 

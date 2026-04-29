@@ -142,13 +142,16 @@ async function handleReactionAdded(event) {
     return;
   }
 
-  // For releasing_staging: PR contains commits from many people. Filter to mine,
-  // then dedupe by Jira key and process each ticket.
+  // For releasing_staging: PR contains commits from many people. Filter to mine
+  // (either author OR committer — cherry-picks count too), dedupe by Jira key,
+  // and process each ticket.
   let jiraKeys;
   if (baseBranch === 'releasing_staging') {
     const commits = await fetchPrCommits(prUrl);
     const myUsername = process.env.MY_GITHUB_USERNAME;
-    const myCommits = commits.filter(c => c.authorLogin === myUsername);
+    const myCommits = commits.filter(
+      c => c.authorLogin === myUsername || c.committerLogin === myUsername
+    );
     jiraKeys = [...new Set(myCommits.map(c => extractJiraKey(c.message)).filter(Boolean))];
 
     if (jiraKeys.length === 0) {
