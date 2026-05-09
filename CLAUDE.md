@@ -115,6 +115,7 @@ Every Jira transition, Jira comment, and Slack thread reply emits a preview line
 | `BOT_URL` | Deployed bot URL (used by git hook) |
 | `DRY_RUN` | Set `true` to suppress real Slack thread replies (Jira mutations still run) |
 | `SLACK_PREVIEW_CHANNEL` | Channel ID where every action preview is posted (always active when set) |
+| `SLACK_WORKSPACE` | Workspace subdomain (e.g. `everfit`) — used to build clickable thread links in previews |
 | `PORT` | Server port (default: 3000) |
 
 ## Key Behaviors
