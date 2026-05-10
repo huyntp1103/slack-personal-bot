@@ -1,6 +1,6 @@
 'use strict';
 
-const { extractJiraKey, extractSlackThread } = require('../src/utils');
+const { extractJiraKey, extractAllJiraKeys, extractSlackThread } = require('../src/utils');
 
 describe('extractJiraKey', () => {
   test('extracts key from plain commit message', () => {
@@ -29,6 +29,34 @@ describe('extractJiraKey', () => {
 
   test('does not match lowercase keys', () => {
     expect(extractJiraKey('up-123 fix')).toBeNull();
+  });
+});
+
+describe('extractAllJiraKeys', () => {
+  test('returns empty array for empty/null input', () => {
+    expect(extractAllJiraKeys('')).toEqual([]);
+    expect(extractAllJiraKeys(null)).toEqual([]);
+    expect(extractAllJiraKeys(undefined)).toEqual([]);
+  });
+
+  test('extracts a single key', () => {
+    expect(extractAllJiraKeys('check UP-1')).toEqual(['UP-1']);
+  });
+
+  test('extracts multiple distinct keys preserving first-occurrence order', () => {
+    expect(extractAllJiraKeys('UP-3 then UP-1 then UP-2')).toEqual(['UP-3', 'UP-1', 'UP-2']);
+  });
+
+  test('dedupes repeated keys', () => {
+    expect(extractAllJiraKeys('UP-1 UP-2 UP-1 UP-2 UP-3')).toEqual(['UP-1', 'UP-2', 'UP-3']);
+  });
+
+  test('matches keys from different projects', () => {
+    expect(extractAllJiraKeys('UP-1 and ABC-99 same line')).toEqual(['UP-1', 'ABC-99']);
+  });
+
+  test('ignores lowercase', () => {
+    expect(extractAllJiraKeys('up-1 lowercase')).toEqual([]);
   });
 });
 

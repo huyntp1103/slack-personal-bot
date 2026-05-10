@@ -11,6 +11,17 @@ function extractJiraKey(text) {
 }
 
 /**
+ * Extracts every Jira issue key from a string, deduplicated, in first-occurrence order.
+ * @param {string} text
+ * @returns {string[]}
+ */
+function extractAllJiraKeys(text) {
+  if (!text) return [];
+  const matches = text.match(/[A-Z]+-\d+/g) || [];
+  return [...new Set(matches)];
+}
+
+/**
  * Extracts Slack channel ID and thread timestamp from a Jira issue description.
  * Works on both ADF objects and plain text by stringifying first.
  * Slack archive URLs encode the timestamp as a digit string with the decimal removed:
@@ -34,4 +45,4 @@ function extractSlackThread(description) {
   return { channel, ts };
 }
 
-module.exports = { extractJiraKey, extractSlackThread };
+module.exports = { extractJiraKey, extractAllJiraKeys, extractSlackThread };

@@ -146,4 +146,21 @@ async function getIssue(issueKey) {
   return client.issues.getIssue({ issueIdOrKey: issueKey });
 }
 
-module.exports = { transitionIssue, addComment, getIssue, createWorklog };
+/**
+ * Fetches just the summary (title) of a Jira issue. Returns null if the issue
+ * doesn't exist or the API errors — callers must handle null gracefully.
+ *
+ * @param {string} issueKey
+ * @returns {Promise<string|null>}
+ */
+async function getIssueSummary(issueKey) {
+  try {
+    const issue = await client.issues.getIssue({ issueIdOrKey: issueKey, fields: ['summary'] });
+    return issue.fields?.summary ?? null;
+  } catch (err) {
+    console.log(`[Jira] getIssueSummary(${issueKey}) failed:`, err.message);
+    return null;
+  }
+}
+
+module.exports = { transitionIssue, addComment, getIssue, createWorklog, getIssueSummary };

@@ -20,7 +20,7 @@ Personal automation bot that eliminates manual Jira transitions and Slack notifi
 │   ├── jira.js           # Jira transition + comment helpers
 │   ├── slack.js          # Slack postMessage + fetchMessage helpers
 │   ├── github.js         # GitHub PR data fetcher (title, base branch, commits)
-│   └── utils.js          # extractJiraKey(), extractSlackThread()
+│   └── utils.js          # extractJiraKey(), extractAllJiraKeys(), extractSlackThread()
 ├── hooks/
 │   └── post-push         # Local git hook script (symlinked into repos)
 ├── tests/
@@ -40,6 +40,8 @@ Personal automation bot that eliminates manual Jira transitions and Slack notifi
 | `git push` (new branch) | Local git `post-push` hook | Branch has no upstream yet | → In Progress |
 | New message in `#backend-review-code` | Slack `message` event | Root message (not reply), from `MY_SLACK_USER_ID`, contains a PR link | → In Review |
 | ✅ reaction on message in `#backend-review-code` | Slack `reaction_added` event | Reaction by `MY_SLACK_USER_ID`, PR base branch in `develop`, `releasing_staging`, `main`, `master` | → QA Ready (always) + comment + Slack thread reply (only when base is `develop` or `releasing_staging`) |
+| `/tickets [YYYY-MM-DD]` (Slack slash command) → `POST /slack/commands` | Slack slash command, only responds to `MY_SLACK_USER_ID` | Optional date arg (default: today in Asia/Bangkok) | Searches every message **you** posted that day (workspace-wide via `search.messages`, no need for the bot to be in the channel), extracts Jira keys, groups by channel. Reply is ephemeral. |
+| `GET /jira/tickets-by-day?date=YYYY-MM-DD` | Direct HTTP call (curl / dev shortcut) | Optional `date` query (default: today) | Same audit as the slash command — JSON response, posts a preview-channel summary too |
 
 ## Jira Key Format
 
@@ -98,6 +100,7 @@ Every Jira transition, Jira comment, and Slack thread reply emits a preview line
 | `JIRA_EMAIL` | Your Atlassian account email |
 | `JIRA_TOKEN` | API token from id.atlassian.com |
 | `SLACK_BOT_TOKEN` | `xoxb-...` Bot User OAuth Token |
+| `SLACK_USER_TOKEN` | `xoxp-...` User OAuth Token — needed for `search.messages` (used by `/tickets`). Requires user scope `search:read`. |
 | `SLACK_SIGNING_SECRET` | From Slack App → Basic Information |
 | `MY_SLACK_USER_ID` | Your Slack member ID (e.g. `U093ZDNQJF3`) |
 | `SLACK_REVIEW_CHANNEL` | Channel ID for `#backend-review-code` |
@@ -116,6 +119,7 @@ Every Jira transition, Jira comment, and Slack thread reply emits a preview line
 | `DRY_RUN` | Set `true` to suppress real Slack thread replies (Jira mutations still run) |
 | `SLACK_PREVIEW_CHANNEL` | Channel ID where every action preview is posted (always active when set) |
 | `SLACK_WORKSPACE` | Workspace subdomain (e.g. `everfit`) — used to build clickable thread links in previews |
+| `IGNORED_AUDIT_CHANNELS` | Comma-separated Slack channel IDs to exclude from `/tickets` audit results |
 | `PORT` | Server port (default: 3000) |
 
 ## Key Behaviors
@@ -157,10 +161,17 @@ After modifying any source file, always consider whether new or updated tests ar
 ## Slack App Setup
 
 1. Go to api.slack.com/apps → Create New App → From Scratch
-2. **OAuth & Permissions** → Bot Token Scopes: `chat:write`, `chat:write.public`, `channels:history`, `groups:history`, `reactions:read`
+2. **OAuth & Permissions** →
+   - **Bot Token Scopes**: `chat:write`, `chat:write.public`, `channels:history`, `groups:history`, `reactions:read`, `commands`
+   - **User Token Scopes**: `search:read` (used by `/tickets` to find your messages anywhere in the workspace)
 3. **Event Subscriptions** → enable, set Request URL to `https://<your-app>/slack/events`
 4. Subscribe to bot events: `message.channels`, `message.groups`, `reaction_added`
-5. Install to Workspace → copy Bot User OAuth Token
+5. **Slash Commands** → Create New Command:
+   - Command: `/tickets`
+   - Request URL: `https://<your-app>/slack/commands`
+   - Short Description: `List Jira tickets mentioned in my channels for a given day`
+   - Usage Hint: `[YYYY-MM-DD]`
+6. Install to Workspace → copy **Bot User OAuth Token** (`xoxb-...`) into `SLACK_BOT_TOKEN` and **User OAuth Token** (`xoxp-...`) into `SLACK_USER_TOKEN`
 
 ## Git Hook Setup
 

@@ -3,6 +3,9 @@
 const { WebClient } = require('@slack/web-api');
 
 const slack = new WebClient(process.env.SLACK_BOT_TOKEN);
+// User token (xoxp-) needed for search.messages — bot tokens cannot search.
+// Required user scope: search:read.
+const userClient = new WebClient(process.env.SLACK_USER_TOKEN);
 
 /**
  * Builds a clickable Slack archive URL for a given channel + thread ts.
@@ -68,6 +71,39 @@ async function fetchMessage(channel, ts) {
 }
 
 /**
+ * Searches all of the user's accessible Slack content (public + private channels,
+ * DMs, group DMs) using the user-token search.messages API. Paginates internally.
+ *
+ * Each match has shape: { text, ts, user, channel: { id, name, is_private, is_im, ... } }
+ *
+ * @param {string} query - Slack search modifier string, e.g. "from:<@U123> on:2026-05-09"
+ * @returns {Promise<Array<object>>}
+ */
+async function searchMyMessages(query) {
+  const matches = [];
+  let page = 1;
+  let totalPages = 1;
+  try {
+    do {
+      const res = await userClient.search.messages({
+        query,
+        count: 100,
+        sort: 'timestamp',
+        sort_dir: 'desc',
+        page,
+      });
+      const got = res.messages?.matches || [];
+      matches.push(...got);
+      totalPages = res.messages?.paging?.pages || 1;
+      page++;
+    } while (page <= totalPages && page <= 50); // safety cap: 50 pages × 100 = 5000 messages
+  } catch (err) {
+    console.log('[Slack] searchMyMessages failed:', err.message);
+  }
+  return matches;
+}
+
+/**
  * Posts a preview message to terminal and SLACK_PREVIEW_CHANNEL (if configured).
  * Always runs regardless of DRY_RUN, so you can audit actions before/while they execute.
  *
@@ -86,4 +122,4 @@ async function preview(text) {
   }
 }
 
-module.exports = { replyToThread, fetchMessage, preview };
+module.exports = { replyToThread, fetchMessage, preview, searchMyMessages };

@@ -4,9 +4,9 @@ require('dotenv').config();
 
 const crypto = require('crypto');
 const express = require('express');
-const { transitionIssue, addComment, getIssue } = require('./jira');
-const { replyToThread, fetchMessage } = require('./slack');
-const { extractJiraKey, extractSlackThread } = require('./utils');
+const { transitionIssue, addComment, getIssue, getIssueSummary } = require('./jira');
+const { replyToThread, fetchMessage, searchMyMessages, preview } = require('./slack');
+const { extractJiraKey, extractAllJiraKeys, extractSlackThread } = require('./utils');
 const { fetchPrTitle, fetchPrData, fetchPrCommits } = require('./github');
 
 const ALLOWED_BASE_BRANCHES = ['develop', 'releasing_staging', 'main', 'master'];
@@ -16,6 +16,12 @@ const app = express();
 
 app.use(express.json({
   verify: (_req, _res, buf) => { _req.rawBody = buf; },
+}));
+
+// Slack slash commands send application/x-www-form-urlencoded
+app.use(express.urlencoded({
+  extended: true,
+  verify: (req, _res, buf) => { req.rawBody = buf; },
 }));
 
 // ─── Health check ────────────────────────────────────────────────────────────
@@ -52,6 +58,141 @@ app.post('/slack/events', async (req, res) => {
     await handleReactionAdded(event);
   }
 });
+
+// ─── Worklog audit: list Jira tickets mentioned in my channels for a given day ──
+
+function todayInBangkok() {
+  return new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Bangkok' });
+}
+
+/**
+ * Searches all messages I posted on `day` (any channel/DM accessible to my user
+ * token), extracts Jira keys, groups by channel. Returns
+ *   { messagesScanned, results: [{ channel, isPrivate, jiraKeys }] }.
+ */
+async function auditTicketsByDay(day) {
+  const userId = process.env.MY_SLACK_USER_ID;
+  const query = `from:<@${userId}> on:${day}`;
+  const matches = await searchMyMessages(query);
+
+  const ignoredChannels = new Set(
+    (process.env.IGNORED_AUDIT_CHANNELS || '').split(',').map(s => s.trim()).filter(Boolean)
+  );
+  const filtered = matches.filter(m => !ignoredChannels.has(m.channel?.id));
+  console.log(`[Audit] ${filtered.length} messages from me on ${day} (after filtering ${matches.length - filtered.length} in ignored channels)`);
+
+  // Flat, deduped list of Jira keys across all kept messages, in first-occurrence order.
+  const seen = new Set();
+  const orderedKeys = [];
+  for (const m of filtered) {
+    for (const key of extractAllJiraKeys(m.text || '')) {
+      if (!seen.has(key)) { seen.add(key); orderedKeys.push(key); }
+    }
+  }
+
+  // Fetch summaries in parallel; null on failure / missing.
+  const summaries = await Promise.all(orderedKeys.map(getIssueSummary));
+  const tickets = orderedKeys.map((key, i) => ({ key, summary: summaries[i] }));
+
+  return { messagesScanned: filtered.length, tickets };
+}
+
+function formatAuditReport(day, messagesScanned, tickets) {
+  const host = (process.env.JIRA_HOST || '').replace(/\/+$/, '');
+  const body = tickets.length
+    ? tickets.map(t => {
+        const link = `<${host}/browse/${t.key}|${t.key}>`;
+        return t.summary ? `${link}: ${t.summary}` : link;
+      }).join('\n')
+    : '_no Jira keys mentioned in any of my messages that day_';
+  return `📋 *Jira tickets I mentioned on ${day}*\nMessages scanned: \`${messagesScanned}\`\n${body}`;
+}
+
+/**
+ * GET /jira/tickets-by-day?date=YYYY-MM-DD
+ * Same logic as the slash command — useful for curl debugging.
+ */
+app.get('/jira/tickets-by-day', async (req, res) => {
+  const day = req.query.date || todayInBangkok();
+
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) {
+    return res.status(400).json({ error: 'date must be YYYY-MM-DD' });
+  }
+
+  const { messagesScanned, tickets } = await auditTicketsByDay(day);
+  await preview(formatAuditReport(day, messagesScanned, tickets));
+
+  res.json({ date: day, messagesScanned, tickets });
+});
+
+// ─── Slack Slash Commands ─────────────────────────────────────────────────────
+
+/**
+ * POST /slack/commands — Slack slash command endpoint.
+ * Handles `/tickets-by-day [YYYY-MM-DD]`. Acks within Slack's 3-second window
+ * with an ephemeral "running" message, then posts the full report to response_url.
+ */
+app.post('/slack/commands', async (req, res) => {
+  if (!verifySlackSignature(req)) {
+    console.warn('[Slack cmd] Invalid signature — request ignored');
+    return res.status(401).send('invalid signature');
+  }
+
+  const { command, text, user_id, response_url } = req.body || {};
+
+  // Only the owner may trigger any slash command. Silently 200 for everyone else
+  // (no reply at all — don't reveal that this is a personal bot).
+  if (user_id !== process.env.MY_SLACK_USER_ID) {
+    console.log(`[Slack cmd] ignoring ${command} from non-owner user ${user_id}`);
+    return res.sendStatus(200);
+  }
+
+  // Ack immediately — Slack times out after 3s
+  res.json({ response_type: 'ephemeral', text: `⏳ Running \`${command}\`...` });
+
+  if (command === '/tickets') {
+    runTicketsByDayCommand(text, response_url).catch(err => {
+      console.log('[Slack cmd] /tickets failed:', err.message);
+    });
+    return;
+  }
+
+  await postToResponseUrl(response_url, {
+    response_type: 'ephemeral',
+    text: `❌ Unknown command \`${command}\`.`,
+  });
+});
+
+async function runTicketsByDayCommand(text, responseUrl) {
+  const day = (text || '').trim() || todayInBangkok();
+
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) {
+    await postToResponseUrl(responseUrl, {
+      response_type: 'ephemeral',
+      text: `❌ Invalid date \`${day}\` — use YYYY-MM-DD.`,
+    });
+    return;
+  }
+
+  const { messagesScanned, tickets } = await auditTicketsByDay(day);
+  await postToResponseUrl(responseUrl, {
+    response_type: 'ephemeral',
+    text: formatAuditReport(day, messagesScanned, tickets),
+  });
+}
+
+async function postToResponseUrl(url, payload) {
+  if (!url) return;
+  try {
+    await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+  } catch (err) {
+    console.log('[Slack cmd] response_url post failed:', err.message);
+  }
+}
 
 // ─── Git Hook Endpoint ────────────────────────────────────────────────────────
 

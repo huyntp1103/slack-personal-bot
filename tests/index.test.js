@@ -4,11 +4,13 @@ jest.mock('../src/jira', () => ({
   transitionIssue: jest.fn(),
   addComment: jest.fn(),
   getIssue: jest.fn(),
+  getIssueSummary: jest.fn(),
 }));
 jest.mock('../src/slack', () => ({
   replyToThread: jest.fn(),
   fetchMessage: jest.fn(),
   preview: jest.fn(),
+  searchMyMessages: jest.fn(),
 }));
 jest.mock('../src/github', () => ({
   fetchPrData: jest.fn(),
@@ -16,12 +18,13 @@ jest.mock('../src/github', () => ({
   fetchPrCommits: jest.fn(),
 }));
 
-const { transitionIssue, addComment, getIssue } = require('../src/jira');
-const { fetchMessage } = require('../src/slack');
+const { transitionIssue, addComment, getIssue, getIssueSummary } = require('../src/jira');
+const { fetchMessage, searchMyMessages, preview } = require('../src/slack');
 const { fetchPrData, fetchPrTitle, fetchPrCommits } = require('../src/github');
 
 process.env.MY_SLACK_USER_ID = 'U093ZDNQJF3';
 process.env.SLACK_REVIEW_CHANNEL = 'C05F65TBB9P';
+process.env.JIRA_HOST = 'https://everfit.atlassian.net/';
 process.env.ID_IN_REVIEW = '41';
 process.env.ID_QA_READY = '51';
 process.env.SLACK_SIGNING_SECRET = '';
@@ -42,6 +45,9 @@ beforeEach(() => {
   fetchMessage.mockResolvedValue({
     text: '<https://github.com/Everfit-io/everfit-api/pull/16391>',
   });
+  searchMyMessages.mockResolvedValue([]);
+  preview.mockResolvedValue(undefined);
+  getIssueSummary.mockResolvedValue(null);
 });
 
 // ─── url_verification ─────────────────────────────────────────────────────────
@@ -288,5 +294,221 @@ describe('POST /git/push', () => {
   test('ignores requests with no jiraKey', async () => {
     await request(app).post('/git/push').send({});
     expect(transitionIssue).not.toHaveBeenCalled();
+  });
+});
+
+// ─── GET /jira/tickets-by-day ─────────────────────────────────────────────────
+
+describe('GET /jira/tickets-by-day', () => {
+  test('rejects malformed date', async () => {
+    const res = await request(app).get('/jira/tickets-by-day?date=2026/05/10');
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/YYYY-MM-DD/);
+  });
+
+  test('returns empty tickets when search returns nothing', async () => {
+    searchMyMessages.mockResolvedValue([]);
+    const res = await request(app).get('/jira/tickets-by-day?date=2026-05-10');
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ date: '2026-05-10', messagesScanned: 0, tickets: [] });
+  });
+
+  test('queries Slack search with `from:<@USER> on:DATE`', async () => {
+    await request(app).get('/jira/tickets-by-day?date=2026-05-10');
+    expect(searchMyMessages).toHaveBeenCalledWith('from:<@U093ZDNQJF3> on:2026-05-10');
+  });
+
+  test('returns flat deduped list of tickets across channels with summaries', async () => {
+    searchMyMessages.mockResolvedValue([
+      { text: 'review giup em UP-100', channel: { id: 'C1', name: 'backend-review-code' } },
+      { text: 'fix UP-100 lan 2',      channel: { id: 'C1', name: 'backend-review-code' } }, // dupe
+      { text: 'and also UP-200',       channel: { id: 'C1', name: 'backend-review-code' } },
+      { text: 'standup: UP-300 va ABC-99', channel: { id: 'C2', name: 'team-be' } },
+    ]);
+    getIssueSummary.mockImplementation(async (key) => {
+      if (key === 'UP-100') return 'Fix login bug';
+      if (key === 'UP-200') return 'Add caching';
+      if (key === 'UP-300') return null; // missing summary still appears
+      return 'Some title';
+    });
+
+    const res = await request(app).get('/jira/tickets-by-day?date=2026-05-10');
+
+    expect(res.status).toBe(200);
+    expect(res.body.messagesScanned).toBe(4);
+    expect(res.body.tickets).toEqual([
+      { key: 'UP-100', summary: 'Fix login bug' },
+      { key: 'UP-200', summary: 'Add caching' },
+      { key: 'UP-300', summary: null },
+      { key: 'ABC-99', summary: 'Some title' },
+    ]);
+  });
+
+  test('excludes channels listed in IGNORED_AUDIT_CHANNELS', async () => {
+    process.env.IGNORED_AUDIT_CHANNELS = 'C0AMZQ68TSP, CSOMETHING';
+    searchMyMessages.mockResolvedValue([
+      { text: 'UP-100 in noisy channel', channel: { id: 'C0AMZQ68TSP', name: 'noisy' } },
+      { text: 'UP-200 in real work',     channel: { id: 'C1', name: 'team-be' } },
+    ]);
+    getIssueSummary.mockResolvedValue('title');
+
+    const res = await request(app).get('/jira/tickets-by-day?date=2026-05-10');
+
+    expect(res.body.messagesScanned).toBe(1);
+    expect(res.body.tickets).toEqual([
+      { key: 'UP-200', summary: 'title' },
+    ]);
+    delete process.env.IGNORED_AUDIT_CHANNELS;
+  });
+
+  test('preview includes a clickable Slack link per ticket with title', async () => {
+    searchMyMessages.mockResolvedValue([
+      { text: 'UP-100 done', channel: { id: 'C1', name: 'team-be' } },
+    ]);
+    getIssueSummary.mockResolvedValue('Fix login bug');
+
+    await request(app).get('/jira/tickets-by-day?date=2026-05-10');
+
+    expect(preview).toHaveBeenCalledTimes(1);
+    const text = preview.mock.calls[0][0];
+    expect(text).toContain('2026-05-10');
+    expect(text).toContain('<https://everfit.atlassian.net/browse/UP-100|UP-100>: Fix login bug');
+    expect(text).not.toContain('team-be'); // no channel header
+  });
+
+  test('preview shows just the link (no colon) when summary is null', async () => {
+    searchMyMessages.mockResolvedValue([
+      { text: 'UP-1', channel: { id: 'C1', name: 'team-be' } },
+    ]);
+    getIssueSummary.mockResolvedValue(null);
+
+    await request(app).get('/jira/tickets-by-day?date=2026-05-10');
+    const text = preview.mock.calls[0][0];
+    expect(text).toContain('<https://everfit.atlassian.net/browse/UP-1|UP-1>');
+    expect(text).not.toContain('UP-1: ');
+  });
+});
+
+// ─── POST /slack/commands (slash commands) ────────────────────────────────────
+
+describe('POST /slack/commands — /tickets', () => {
+  let fetchMock;
+
+  beforeEach(() => {
+    fetchMock = jest.fn().mockResolvedValue({ ok: true });
+    global.fetch = fetchMock;
+    searchMyMessages.mockResolvedValue([
+      { text: 'standup: lam UP-100 va UP-200', channel: { id: 'C1', name: 'team-be', is_private: true } },
+    ]);
+  });
+
+  afterEach(() => {
+    delete global.fetch;
+  });
+
+  test('silently ignores users other than MY_SLACK_USER_ID', async () => {
+    const res = await request(app)
+      .post('/slack/commands')
+      .type('form')
+      .send({
+        command: '/tickets',
+        text: '',
+        user_id: 'UOTHER',
+        response_url: 'https://hooks.slack.com/x',
+      });
+    // Slack still needs a 200, but we send no body — nothing shown to the user
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({});
+    expect(res.text).toBe('OK'); // Express sendStatus(200) default body
+    expect(searchMyMessages).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  test('acks immediately with ephemeral "running" message', async () => {
+    const res = await request(app)
+      .post('/slack/commands')
+      .type('form')
+      .send({
+        command: '/tickets',
+        text: '',
+        user_id: 'U093ZDNQJF3',
+        response_url: 'https://hooks.slack.com/x',
+      });
+    expect(res.status).toBe(200);
+    expect(res.body.response_type).toBe('ephemeral');
+    expect(res.body.text).toContain('Running');
+  });
+
+  test('posts the audit report to response_url for default (today)', async () => {
+    await request(app)
+      .post('/slack/commands')
+      .type('form')
+      .send({
+        command: '/tickets',
+        text: '',
+        user_id: 'U093ZDNQJF3',
+        response_url: 'https://hooks.slack.com/RESPONSE',
+      });
+
+    // Allow async followup to flush
+    await new Promise(setImmediate);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, opts] = fetchMock.mock.calls[0];
+    expect(url).toBe('https://hooks.slack.com/RESPONSE');
+    const body = JSON.parse(opts.body);
+    expect(body.response_type).toBe('ephemeral');
+    expect(body.text).toContain('<https://everfit.atlassian.net/browse/UP-100|UP-100>');
+    expect(body.text).toContain('<https://everfit.atlassian.net/browse/UP-200|UP-200>');
+    expect(body.text).not.toContain('team-be'); // no channel header in flat report
+  });
+
+  test('honours an explicit YYYY-MM-DD argument', async () => {
+    await request(app)
+      .post('/slack/commands')
+      .type('form')
+      .send({
+        command: '/tickets',
+        text: '2026-05-09',
+        user_id: 'U093ZDNQJF3',
+        response_url: 'https://hooks.slack.com/RESPONSE',
+      });
+    await new Promise(setImmediate);
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(body.text).toContain('2026-05-09');
+  });
+
+  test('rejects malformed date with ephemeral error', async () => {
+    await request(app)
+      .post('/slack/commands')
+      .type('form')
+      .send({
+        command: '/tickets',
+        text: '2026/05/09',
+        user_id: 'U093ZDNQJF3',
+        response_url: 'https://hooks.slack.com/RESPONSE',
+      });
+    await new Promise(setImmediate);
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(body.text).toMatch(/Invalid date/);
+    expect(searchMyMessages).not.toHaveBeenCalled();
+  });
+
+  test('replies with "unknown command" for unrecognised slash command', async () => {
+    await request(app)
+      .post('/slack/commands')
+      .type('form')
+      .send({
+        command: '/something-else',
+        text: '',
+        user_id: 'U093ZDNQJF3',
+        response_url: 'https://hooks.slack.com/RESPONSE',
+      });
+    await new Promise(setImmediate);
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(body.text).toMatch(/Unknown command/);
   });
 });
