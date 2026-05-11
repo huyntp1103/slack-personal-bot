@@ -16,11 +16,12 @@ jest.mock('../src/github', () => ({
   fetchPrData: jest.fn(),
   fetchPrTitle: jest.fn(),
   fetchPrCommits: jest.fn(),
+  approvePr: jest.fn(),
 }));
 
 const { transitionIssue, addComment, getIssue, getIssueSummary } = require('../src/jira');
 const { fetchMessage, searchMyMessages, preview } = require('../src/slack');
-const { fetchPrData, fetchPrTitle, fetchPrCommits } = require('../src/github');
+const { fetchPrData, fetchPrTitle, fetchPrCommits, approvePr } = require('../src/github');
 
 process.env.MY_SLACK_USER_ID = 'U093ZDNQJF3';
 process.env.SLACK_REVIEW_CHANNEL = 'C05F65TBB9P';
@@ -42,6 +43,7 @@ beforeEach(() => {
   fetchPrTitle.mockResolvedValue('feat: UP-69726 some feature');
   fetchPrData.mockResolvedValue({ title: 'feat: UP-69726 some feature', baseBranch: 'develop' });
   fetchPrCommits.mockResolvedValue([]);
+  approvePr.mockResolvedValue(true);
   fetchMessage.mockResolvedValue({
     text: '<https://github.com/Everfit-io/everfit-api/pull/16391>',
   });
@@ -126,6 +128,7 @@ function reactionPayload(overrides = {}) {
       type: 'reaction_added',
       user: 'U093ZDNQJF3',
       reaction: 'white_check_mark',
+      item_user: 'U093ZDNQJF3', // my own message → routes to QA Ready flow
       item: {
         type: 'message',
         channel: 'C05F65TBB9P',
@@ -510,5 +513,97 @@ describe('POST /slack/commands — /tickets', () => {
 
     const body = JSON.parse(fetchMock.mock.calls[0][1].body);
     expect(body.text).toMatch(/Unknown command/);
+  });
+});
+
+// ─── handleApproveReaction (✅ on teammate's message) ──────────────────────────
+
+function approvePayload(overrides = {}) {
+  return {
+    type: 'event_callback',
+    event: {
+      type: 'reaction_added',
+      user: 'U093ZDNQJF3',           // me
+      reaction: 'white_check_mark',
+      item_user: 'UTEAMMATE',        // teammate posted the message
+      item: {
+        type: 'message',
+        channel: 'C05F65TBB9P',      // SLACK_REVIEW_CHANNEL
+        ts: '1712345678.901234',
+      },
+      ...overrides,
+    },
+  };
+}
+
+describe('handleApproveReaction', () => {
+  beforeEach(() => {
+    delete process.env.DRY_RUN;
+    fetchMessage.mockResolvedValue({
+      text: '<https://github.com/Everfit-io/everfit-api/pull/16391>',
+    });
+  });
+
+  test('approves the single PR linked in a teammate message', async () => {
+    await request(app).post('/slack/events').send(approvePayload());
+    expect(approvePr).toHaveBeenCalledTimes(1);
+    expect(approvePr).toHaveBeenCalledWith('https://github.com/Everfit-io/everfit-api/pull/16391');
+  });
+
+  test('approves every PR when the message contains multiple links', async () => {
+    fetchMessage.mockResolvedValue({
+      text: 'review giup em <https://github.com/Everfit-io/everfit-api/pull/100> va <https://github.com/Everfit-io/everfit-api/pull/200>',
+    });
+    await request(app).post('/slack/events').send(approvePayload());
+    expect(approvePr).toHaveBeenCalledTimes(2);
+    expect(approvePr).toHaveBeenCalledWith('https://github.com/Everfit-io/everfit-api/pull/100');
+    expect(approvePr).toHaveBeenCalledWith('https://github.com/Everfit-io/everfit-api/pull/200');
+  });
+
+  test('dedupes repeated PR URLs in the same message', async () => {
+    fetchMessage.mockResolvedValue({
+      text: '<https://github.com/o/r/pull/1> and again <https://github.com/o/r/pull/1>',
+    });
+    await request(app).post('/slack/events').send(approvePayload());
+    expect(approvePr).toHaveBeenCalledTimes(1);
+  });
+
+  test('ignores reactions from other users', async () => {
+    await request(app).post('/slack/events').send(approvePayload({ user: 'UOTHER' }));
+    expect(approvePr).not.toHaveBeenCalled();
+  });
+
+  test('ignores reactions from outside SLACK_REVIEW_CHANNEL', async () => {
+    await request(app).post('/slack/events').send(
+      approvePayload({ item: { type: 'message', channel: 'COTHER', ts: '1.2' } })
+    );
+    expect(approvePr).not.toHaveBeenCalled();
+  });
+
+  test('✅ on MY own message routes to QA flow, not approve', async () => {
+    await request(app).post('/slack/events').send(
+      approvePayload({ item_user: 'U093ZDNQJF3' })
+    );
+    expect(approvePr).not.toHaveBeenCalled();
+    // QA flow side-effects exercised by the handleReactionAdded tests above; here we
+    // only assert that approve is NOT triggered.
+  });
+
+  test('ignores messages without a GitHub PR link', async () => {
+    fetchMessage.mockResolvedValue({ text: 'just a normal chat' });
+    await request(app).post('/slack/events').send(approvePayload());
+    expect(approvePr).not.toHaveBeenCalled();
+  });
+
+  test('approves even when DRY_RUN=true (PR approval ignores DRY_RUN)', async () => {
+    process.env.DRY_RUN = 'true';
+    await request(app).post('/slack/events').send(approvePayload());
+    expect(approvePr).toHaveBeenCalledTimes(1);
+    delete process.env.DRY_RUN;
+  });
+
+  test('ignores reactions other than white_check_mark', async () => {
+    await request(app).post('/slack/events').send(approvePayload({ reaction: 'thumbsup' }));
+    expect(approvePr).not.toHaveBeenCalled();
   });
 });

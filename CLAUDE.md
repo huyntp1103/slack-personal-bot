@@ -39,7 +39,8 @@ Personal automation bot that eliminates manual Jira transitions and Slack notifi
 | --- | --- | --- | --- |
 | `git push` (new branch) | Local git `post-push` hook | Branch has no upstream yet | → In Progress |
 | New message in `#backend-review-code` | Slack `message` event | Root message (not reply), from `MY_SLACK_USER_ID`, contains a PR link | → In Review |
-| ✅ reaction on message in `#backend-review-code` | Slack `reaction_added` event | Reaction by `MY_SLACK_USER_ID`, PR base branch in `develop`, `releasing_staging`, `main`, `master` | → QA Ready (always) + comment + Slack thread reply (only when base is `develop` or `releasing_staging`) |
+| ✅ reaction on **my own** message in `#backend-review-code` | Slack `reaction_added` event | Reaction by `MY_SLACK_USER_ID`, `item_user === MY_SLACK_USER_ID`, PR base branch in `develop`, `releasing_staging`, `main`, `master` | → QA Ready (always) + comment + Slack thread reply (only when base is `develop` or `releasing_staging`) |
+| ✅ reaction on a **teammate's** message in `#backend-review-code` | Slack `reaction_added` event | Reaction by `MY_SLACK_USER_ID`, `item_user !== MY_SLACK_USER_ID`, message contains ≥1 GitHub PR link | Approves each PR via GitHub `POST /pulls/:n/reviews` (event `APPROVE`). Ignores `DRY_RUN`. |
 | `/tickets [YYYY-MM-DD]` (Slack slash command) → `POST /slack/commands` | Slack slash command, only responds to `MY_SLACK_USER_ID` | Optional date arg (default: today in Asia/Bangkok) | Searches every message **you** posted that day (workspace-wide via `search.messages`, no need for the bot to be in the channel), extracts Jira keys, groups by channel. Reply is ephemeral. |
 | `GET /jira/tickets-by-day?date=YYYY-MM-DD` | Direct HTTP call (curl / dev shortcut) | Optional `date` query (default: today) | Same audit as the slash command — JSON response, posts a preview-channel summary too |
 
@@ -72,15 +73,16 @@ Jira base URL: `https://everfit.atlassian.net/browse/<KEY>`
   - Message must contain a GitHub PR link
   - Slack wraps URLs as `<https://...>` — stripped before matching
 
-- **`reaction_added` event** (QA Ready trigger):
-  - Reaction: `white_check_mark` (✅)
-  - `event.user === MY_SLACK_USER_ID`
-  - `event.item.type === 'message'`
-  - Channel: `SLACK_REVIEW_CHANNEL`
-  - PR base branch must be one of `develop`, `releasing_staging`, `main`, `master`
-  - **`releasing_staging` PRs**: contain commits from many people, so the bot fetches the PR commit list, filters to commits where `MY_GITHUB_USERNAME` is the **author OR committer** (so cherry-picked commits count too), dedupes by Jira key, and processes each ticket independently
-  - **For all other branches**: single ticket extracted from the Slack message text or PR title
-  - **Notification scope**: comment + Slack thread reply only fire for `develop` and `releasing_staging`. For `main`/`master`, the bot transitions the ticket and stops.
+- **`reaction_added` event — `:white_check_mark:`** (single emoji, two flows — routed by `event.item_user`):
+  - Shared filters: `event.user === MY_SLACK_USER_ID`, `event.item.type === 'message'`, channel `SLACK_REVIEW_CHANNEL`.
+  - `event.item_user === MY_SLACK_USER_ID` → **QA Ready flow** (`handleReactionAdded`):
+    - PR base branch must be one of `develop`, `releasing_staging`, `main`, `master`.
+    - **`releasing_staging` PRs**: contain commits from many people, so the bot fetches the PR commit list, filters to commits where `MY_GITHUB_USERNAME` is the **author OR committer** (so cherry-picked commits count too), dedupes by Jira key, and processes each ticket independently.
+    - **For all other branches**: single ticket extracted from the Slack message text or PR title.
+    - **Notification scope**: comment + Slack thread reply only fire for `develop` and `releasing_staging`. For `main`/`master`, the bot transitions the ticket and stops.
+  - `event.item_user !== MY_SLACK_USER_ID` → **PR approve flow** (`handleApproveReaction`):
+    - Extracts every `https://github.com/<owner>/<repo>/pull/<n>` in the teammate's message, dedupes, and calls `approvePr` on each.
+    - **Ignores `DRY_RUN`** — approvals always run when this flow triggers.
 
 ## Slack URL Verification
 

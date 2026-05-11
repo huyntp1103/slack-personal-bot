@@ -81,4 +81,42 @@ async function fetchPrCommits(prUrl) {
   }
 }
 
-module.exports = { fetchPrData, fetchPrTitle, fetchPrCommits };
+/**
+ * Posts an APPROVE review on a PR.
+ *
+ * @param {string} prUrl - PR URL or any URL matching .../{owner}/{repo}/pull/{number}
+ * @param {string} [body] - Optional review comment
+ * @returns {Promise<boolean>} true if GitHub returned 2xx, false otherwise
+ */
+async function approvePr(prUrl, body = '') {
+  const match = prUrl.match(/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/);
+  if (!match) return false;
+
+  const [, owner, repo, number] = match;
+  const apiUrl = `https://api.github.com/repos/${owner}/${repo}/pulls/${number}/reviews`;
+
+  try {
+    const res = await fetch(apiUrl, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${process.env.GITHUB_TOKEN}`,
+        Accept: 'application/vnd.github+json',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ event: 'APPROVE', body }),
+    });
+
+    if (!res.ok) {
+      const errText = await res.text().catch(() => '');
+      console.log(`[GitHub] approvePr ${owner}/${repo}#${number} failed: ${res.status} ${errText}`);
+      return false;
+    }
+    console.log(`[GitHub] Approved ${owner}/${repo}#${number}`);
+    return true;
+  } catch (err) {
+    console.log('[GitHub] approvePr error:', err.message);
+    return false;
+  }
+}
+
+module.exports = { fetchPrData, fetchPrTitle, fetchPrCommits, approvePr };

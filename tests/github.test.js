@@ -1,6 +1,6 @@
 'use strict';
 
-const { fetchPrData, fetchPrTitle, fetchPrCommits } = require('../src/github');
+const { fetchPrData, fetchPrTitle, fetchPrCommits, approvePr } = require('../src/github');
 
 const PR_URL = 'https://github.com/Everfit-io/everfit-api/pull/16391';
 
@@ -123,5 +123,44 @@ describe('fetchPrCommits', () => {
     global.fetch.mockRejectedValue(new Error('boom'));
     const commits = await fetchPrCommits(PR_URL);
     expect(commits).toEqual([]);
+  });
+});
+
+describe('approvePr', () => {
+  test('POSTs an APPROVE review and returns true on 2xx', async () => {
+    global.fetch.mockResolvedValue({ ok: true });
+    const ok = await approvePr(PR_URL);
+    expect(ok).toBe(true);
+
+    const [url, opts] = global.fetch.mock.calls[0];
+    expect(url).toBe('https://api.github.com/repos/Everfit-io/everfit-api/pulls/16391/reviews');
+    expect(opts.method).toBe('POST');
+    expect(JSON.parse(opts.body)).toEqual({ event: 'APPROVE', body: '' });
+  });
+
+  test('passes through an optional review body', async () => {
+    global.fetch.mockResolvedValue({ ok: true });
+    await approvePr(PR_URL, 'LGTM');
+    expect(JSON.parse(global.fetch.mock.calls[0][1].body).body).toBe('LGTM');
+  });
+
+  test('returns false on non-ok response', async () => {
+    global.fetch.mockResolvedValue({
+      ok: false,
+      status: 422,
+      statusText: 'Unprocessable',
+      text: async () => '{"message":"Can not approve your own pull request"}',
+    });
+    expect(await approvePr(PR_URL)).toBe(false);
+  });
+
+  test('returns false on network error', async () => {
+    global.fetch.mockRejectedValue(new Error('boom'));
+    expect(await approvePr(PR_URL)).toBe(false);
+  });
+
+  test('returns false (no fetch) for malformed URL', async () => {
+    expect(await approvePr('not-a-pr-url')).toBe(false);
+    expect(global.fetch).not.toHaveBeenCalled();
   });
 });

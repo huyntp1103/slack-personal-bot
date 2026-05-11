@@ -7,7 +7,7 @@ const express = require('express');
 const { transitionIssue, addComment, getIssue, getIssueSummary } = require('./jira');
 const { replyToThread, fetchMessage, searchMyMessages, preview } = require('./slack');
 const { extractJiraKey, extractAllJiraKeys, extractSlackThread } = require('./utils');
-const { fetchPrTitle, fetchPrData, fetchPrCommits } = require('./github');
+const { fetchPrTitle, fetchPrData, fetchPrCommits, approvePr } = require('./github');
 
 const ALLOWED_BASE_BRANCHES = ['develop', 'releasing_staging', 'main', 'master'];
 const NOTIFY_BASE_BRANCHES = ['develop', 'releasing_staging'];
@@ -54,8 +54,14 @@ app.post('/slack/events', async (req, res) => {
 
   if (event.type === 'message') {
     await handleReviewMessage(event);
-  } else if (event.type === 'reaction_added') {
-    await handleReactionAdded(event);
+  } else if (event.type === 'reaction_added' && event.reaction === 'white_check_mark') {
+    // ✅ on my own message → QA Ready flow
+    // ✅ on a teammate's message → approve their PR(s)
+    if (event.item_user === process.env.MY_SLACK_USER_ID) {
+      await handleReactionAdded(event);
+    } else {
+      await handleApproveReaction(event);
+    }
   }
 });
 
@@ -353,6 +359,34 @@ async function processQaReadyTicket(jiraKey, baseBranch) {
     }
   } catch (err) {
     console.log(`[Slack] processQaReadyTicket post-transition error (${jiraKey}):`, err.message);
+  }
+}
+
+/**
+ * ✅ reaction on a teammate's message in #backend-review-code → approve every
+ * GitHub PR linked in that message. The dispatch in /slack/events already routes
+ * here only when item_user is not me.
+ */
+async function handleApproveReaction(event) {
+  if (event.user !== process.env.MY_SLACK_USER_ID) return;
+  if (event.item.type !== 'message') return;
+  if (event.item.channel !== process.env.SLACK_REVIEW_CHANNEL) return;
+
+  const message = await fetchMessage(event.item.channel, event.item.ts);
+  if (!message) {
+    console.warn('[Slack] ✅ on teammate — could not fetch original message');
+    return;
+  }
+
+  const cleanText = (message.text || '').replace(/<([^>]+)>/g, '$1');
+  const prUrls = [...new Set(cleanText.match(/https:\/\/github\.com\/[^|\s]+\/pull\/\d+/g) || [])];
+  if (prUrls.length === 0) return;
+
+  console.log(`[Slack] ✅ on teammate message — approving ${prUrls.length} PR(s)`);
+
+  for (const url of prUrls) {
+    const ok = await approvePr(url);
+    await preview(`${ok ? '✅' : '⚠️'} *PR ${ok ? 'approved' : 'approve failed'}*\n<${url}|${url}>`);
   }
 }
 
