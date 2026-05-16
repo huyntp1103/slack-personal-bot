@@ -10,7 +10,7 @@ jest.mock('@slack/web-api', () => ({
   })),
 }));
 
-const { replyToThread } = require('../src/slack');
+const { replyToThread, preview } = require('../src/slack');
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -18,6 +18,7 @@ beforeEach(() => {
   process.env.SLACK_PREVIEW_CHANNEL = 'C_PREVIEW';
   delete process.env.DRY_RUN;
   delete process.env.SLACK_WORKSPACE;
+  delete process.env.MY_SLACK_USER_ID;
 });
 
 describe('replyToThread — preview link', () => {
@@ -59,5 +60,33 @@ describe('replyToThread — preview link', () => {
       thread_ts: '1778214715.118289',
       text: 'hello',
     });
+  });
+});
+
+describe('preview — owner tagging', () => {
+  test('appends <@MY_SLACK_USER_ID> on a new line at the end', async () => {
+    process.env.MY_SLACK_USER_ID = 'U093ZDNQJF3';
+
+    await preview('🔄 *Jira transition*\nTicket: `UP-1`');
+
+    const text = mockPostMessage.mock.calls[0][0].text;
+    expect(text.endsWith('\n<@U093ZDNQJF3>')).toBe(true);
+    expect(text).toContain('🔄 *Jira transition*');
+  });
+
+  test('skips tagging when opts.tag === false', async () => {
+    process.env.MY_SLACK_USER_ID = 'U093ZDNQJF3';
+
+    await preview('✅ *PR approved*', { tag: false });
+
+    const text = mockPostMessage.mock.calls[0][0].text;
+    expect(text).not.toContain('<@U093ZDNQJF3>');
+    expect(text).toBe('✅ *PR approved*');
+  });
+
+  test('skips tagging when MY_SLACK_USER_ID is unset', async () => {
+    await preview('🔄 *Jira transition*');
+    const text = mockPostMessage.mock.calls[0][0].text;
+    expect(text).not.toContain('<@');
   });
 });

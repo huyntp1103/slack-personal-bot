@@ -109,14 +109,18 @@ async function searchMyMessages(query) {
  *
  * @param {string} text
  */
-async function preview(text) {
-  console.log(`[PREVIEW] ${text}`);
+async function preview(text, opts = {}) {
+  const { tag = true } = opts;
+  const userId = process.env.MY_SLACK_USER_ID;
+  const finalText = tag && userId ? `${text}\n<@${userId}>` : text;
+
+  console.log(`[PREVIEW] ${finalText}`);
 
   const channel = process.env.SLACK_PREVIEW_CHANNEL;
   if (!channel) return;
 
   try {
-    await slack.chat.postMessage({ channel, text });
+    await slack.chat.postMessage({ channel, text: finalText });
   } catch (err) {
     console.log(`[PREVIEW] post failed:`, err.message);
   }

@@ -2,7 +2,11 @@
 
 Simulates a Slack event payload against the local server.
 
-Usage: `/test-slack-event <event>` — event is one of: `message`, `reaction`
+Usage: `/test-slack-event <event>` — event is one of: `message`, `qa-ready`, `approve`
+
+- `message` → simulates a new PR post (handleReviewMessage → In Review)
+- `qa-ready` → ✅ on my own message (handleReactionAdded → QA Ready)
+- `approve` → ✅ on a teammate's message (handleApproveReaction → PR approve)
 
 ```bash
 EVENT=$ARGUMENTS
@@ -18,13 +22,29 @@ if [ "$EVENT" = "message" ]; then
       "ts": "1712345678.901234"
     }
   }'
-elif [ "$EVENT" = "reaction" ]; then
+elif [ "$EVENT" = "qa-ready" ]; then
   PAYLOAD='{
     "type": "event_callback",
     "event": {
       "type": "reaction_added",
       "user": "'"${MY_SLACK_USER_ID}"'",
       "reaction": "white_check_mark",
+      "item_user": "'"${MY_SLACK_USER_ID}"'",
+      "item": {
+        "type": "message",
+        "channel": "'"${SLACK_REVIEW_CHANNEL}"'",
+        "ts": "1712345678.901234"
+      }
+    }
+  }'
+elif [ "$EVENT" = "approve" ]; then
+  PAYLOAD='{
+    "type": "event_callback",
+    "event": {
+      "type": "reaction_added",
+      "user": "'"${MY_SLACK_USER_ID}"'",
+      "reaction": "white_check_mark",
+      "item_user": "UTEAMMATE",
       "item": {
         "type": "message",
         "channel": "'"${SLACK_REVIEW_CHANNEL}"'",

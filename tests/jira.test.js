@@ -10,11 +10,12 @@ const mockGetIssue = jest.fn();
 const mockDoTransition = jest.fn();
 const mockAddComment = jest.fn();
 const mockAddWorklog = jest.fn();
+const mockGetIssueWorklog = jest.fn();
 
 Version2Client.mockImplementation(() => ({
   issues: { getIssue: mockGetIssue, doTransition: mockDoTransition },
   issueComments: { addComment: mockAddComment },
-  issueWorklogs: { addWorklog: mockAddWorklog },
+  issueWorklogs: { addWorklog: mockAddWorklog, getIssueWorklog: mockGetIssueWorklog },
 }));
 
 // Set env vars before requiring jira.js so the module-level client is initialised
@@ -43,6 +44,8 @@ beforeEach(() => {
   mockDoTransition.mockResolvedValue({});
   mockAddComment.mockResolvedValue({});
   mockAddWorklog.mockResolvedValue({});
+  // Default: no existing worklogs so createWorklog proceeds
+  mockGetIssueWorklog.mockResolvedValue({ total: 0, worklogs: [] });
 });
 
 describe('transitionIssue — status guard', () => {
@@ -156,6 +159,18 @@ describe('createWorklog', () => {
     mockAddWorklog.mockRejectedValue(new Error('boom'));
     await expect(createWorklog('UP-1')).resolves.toBeUndefined();
   });
+
+  test('skips when the ticket already has at least one worklog (idempotent)', async () => {
+    mockGetIssueWorklog.mockResolvedValue({ total: 1, worklogs: [{ id: '9001' }] });
+    await createWorklog('UP-1');
+    expect(mockAddWorklog).not.toHaveBeenCalled();
+  });
+
+  test('proceeds to create when getIssueWorklog itself fails (fail-open)', async () => {
+    mockGetIssueWorklog.mockRejectedValue(new Error('network'));
+    await createWorklog('UP-1');
+    expect(mockAddWorklog).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('transitionIssue — worklog before In Review', () => {
@@ -186,5 +201,14 @@ describe('transitionIssue — worklog before In Review', () => {
     mockIssue({ status: 'In Review' });
     await transitionIssue('UP-1', '51');
     expect(mockAddWorklog).not.toHaveBeenCalled();
+  });
+
+  test('In Progress → In Review skips worklog when ticket already has one, but still transitions', async () => {
+    mockIssue({ status: 'In Progress' });
+    mockGetIssueWorklog.mockResolvedValue({ total: 2, worklogs: [{}, {}] });
+    const result = await transitionIssue('UP-1', '41');
+    expect(mockAddWorklog).not.toHaveBeenCalled();
+    expect(mockDoTransition).toHaveBeenCalledWith({ issueIdOrKey: 'UP-1', transition: { id: '41' } });
+    expect(result).toBe(true);
   });
 });

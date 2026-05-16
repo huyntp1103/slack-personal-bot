@@ -92,6 +92,18 @@ async function transitionIssue(issueKey, transitionId) {
  * @param {{ timeSpentSeconds?: number, started?: string, description?: string }} [opts]
  */
 async function createWorklog(issueKey, opts = {}) {
+  // Idempotency: if the ticket already has any worklog, skip — we don't want to
+  // double-log. (Failure to fetch falls through to creating, on the safer side.)
+  try {
+    const existing = await client.issueWorklogs.getIssueWorklog({ issueIdOrKey: issueKey });
+    if ((existing.total ?? existing.worklogs?.length ?? 0) > 0) {
+      console.log(`[Jira] ${issueKey} already has worklog(s) — skipping createWorklog`);
+      return;
+    }
+  } catch (err) {
+    console.log(`[Jira] getIssueWorklog(${issueKey}) failed, will attempt to create anyway:`, err.message);
+  }
+
   const timeSpentSeconds = opts.timeSpentSeconds ?? 3600;
   const description = opts.description
     ?? 'Implement based on solution design & implementation plan, self-review, self-test';

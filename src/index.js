@@ -126,7 +126,7 @@ app.get('/jira/tickets-by-day', async (req, res) => {
   }
 
   const { messagesScanned, tickets } = await auditTicketsByDay(day);
-  await preview(formatAuditReport(day, messagesScanned, tickets));
+  await preview(formatAuditReport(day, messagesScanned, tickets), { tag: false });
 
   res.json({ date: day, messagesScanned, tickets });
 });
@@ -386,7 +386,10 @@ async function handleApproveReaction(event) {
 
   for (const url of prUrls) {
     const ok = await approvePr(url);
-    await preview(`${ok ? '✅' : '⚠️'} *PR ${ok ? 'approved' : 'approve failed'}*\n<${url}|${url}>`);
+    await preview(
+      `${ok ? '✅' : '⚠️'} *PR ${ok ? 'approved' : 'approve failed'}*\n<${url}|${url}>`,
+      { tag: false }
+    );
   }
 }
 
