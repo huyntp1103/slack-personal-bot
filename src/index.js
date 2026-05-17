@@ -325,6 +325,13 @@ async function handleReactionAdded(event) {
 }
 
 async function processQaReadyTicket(jiraKey, baseBranch) {
+  // Delay the whole QA notification — transition, comment, and Slack reply all
+  // happen after QA_NOTIFY_DELAY_MINUTES, so QA isn't pinged until the PR is
+  // demonstrably stable for a few minutes.
+  const DELAY_MS = Number(process.env.QA_NOTIFY_DELAY_MINUTES ?? 15) * 60 * 1000;
+  console.log(`[Slack] ⏳ waiting ${process.env.QA_NOTIFY_DELAY_MINUTES ?? 15} minutes before QA Ready transition for ${jiraKey}...`);
+  await new Promise(resolve => setTimeout(resolve, DELAY_MS));
+
   console.log(`[Slack] ✅ transitioning ${jiraKey} → QA Ready (base: ${baseBranch})`);
 
   const transitioned = await transitionIssue(jiraKey, process.env.ID_QA_READY);
@@ -332,10 +339,6 @@ async function processQaReadyTicket(jiraKey, baseBranch) {
 
   // For main/master we only transition — no comment, no Slack reply
   if (!NOTIFY_BASE_BRANCHES.includes(baseBranch)) return;
-
-  const DELAY_MS = Number(process.env.QA_NOTIFY_DELAY_MINUTES ?? 15) * 60 * 1000;
-  console.log(`[Slack] ⏳ waiting ${process.env.QA_NOTIFY_DELAY_MINUTES ?? 15} minutes before notifying QA for ${jiraKey}...`);
-  await new Promise(resolve => setTimeout(resolve, DELAY_MS));
 
   const env = baseBranch === 'releasing_staging' ? 'STAGING' : 'DEV';
 

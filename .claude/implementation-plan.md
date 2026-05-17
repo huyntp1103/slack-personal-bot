@@ -80,9 +80,9 @@ The `/slack/events` route filters `reaction === 'white_check_mark'` and channel 
        (committer match catches cherry-picks where you applied someone else's commit)
    - Else: extractJiraKey(message text) || extractJiraKey(PR title) → single key
 6. For each jiraKey, processQaReadyTicket(jiraKey, baseBranch):
-   a. transitionIssue(key, ID_QA_READY) → if false, return
-   b. If baseBranch ∈ {main, master}: stop here (transition only)
-   c. Wait QA_NOTIFY_DELAY_MINUTES
+   a. Wait QA_NOTIFY_DELAY_MINUTES (delay applies to the transition itself, not just the notifications)
+   b. transitionIssue(key, ID_QA_READY) → if false, return
+   c. If baseBranch ∈ {main, master}: stop here (transition only)
    d. env = baseBranch === 'releasing_staging' ? 'STAGING' : 'DEV'
    e. addComment(key, `Ready for QA testing on ${env}`)
    f. getIssue(key) → if Bug: extractSlackThread(description) → replyToThread(`Dạ card này test được ở ${env} rồi ạ`)

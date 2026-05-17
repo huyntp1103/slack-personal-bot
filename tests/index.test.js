@@ -149,8 +149,14 @@ describe('handleReactionAdded', () => {
     await jest.runAllTimersAsync();
   }
 
-  test('transitions to QA Ready immediately (before delay)', async () => {
+  test('does NOT transition before the delay elapses', async () => {
     await request(app).post('/slack/events').send(reactionPayload());
+    // Timers have not been advanced yet → transition hasn't fired
+    expect(transitionIssue).not.toHaveBeenCalled();
+  });
+
+  test('transitions to QA Ready after the delay', async () => {
+    await sendReaction();
     expect(transitionIssue).toHaveBeenCalledWith('UP-69726', '51');
   });
 
