@@ -375,6 +375,16 @@ async function handleApproveReaction(event) {
   if (event.item.type !== 'message') return;
   if (event.item.channel !== process.env.SLACK_REVIEW_CHANNEL) return;
 
+  console.log(`[Slack] ✅ on teammate message — item_user=${event.item_user}`);
+
+  const ignoredTeammates = new Set(
+    (process.env.IGNORED_TEAMMATE || '').split(',').map(s => s.trim()).filter(Boolean)
+  );
+  if (ignoredTeammates.has(event.item_user)) {
+    console.log(`[Slack] ✅ skipping approve flow for ignored item_user ${event.item_user}`);
+    return;
+  }
+
   const message = await fetchMessage(event.item.channel, event.item.ts);
   if (!message) {
     console.warn('[Slack] ✅ on teammate — could not fetch original message');

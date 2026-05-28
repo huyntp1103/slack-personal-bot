@@ -82,6 +82,7 @@ Jira base URL: `https://everfit.atlassian.net/browse/<KEY>`
     - **For all other branches**: single ticket extracted from the Slack message text or PR title.
     - **Notification scope**: comment + Slack thread reply only fire for `develop` and `releasing_staging`. For `main`/`master`, the bot transitions the ticket and stops.
   - `event.item_user !== MY_SLACK_USER_ID` → **PR approve flow** (`handleApproveReaction`):
+    - If `event.item_user` is in `IGNORED_TEAMMATE` (comma-separated Slack user IDs), the flow is skipped — used to suppress accidental triggers on bots or specific teammates.
     - Extracts every `https://github.com/<owner>/<repo>/pull/<n>` in the teammate's message, dedupes, and calls `approvePr` on each.
     - **Ignores `DRY_RUN`** — approvals always run when this flow triggers.
 
@@ -125,6 +126,7 @@ By default the preview text is suffixed with `\n<@MY_SLACK_USER_ID>` so you get 
 | `SLACK_PREVIEW_CHANNEL` | Channel ID where every action preview is posted (always active when set) |
 | `SLACK_WORKSPACE` | Workspace subdomain (e.g. `everfit`) — used to build clickable thread links in previews |
 | `IGNORED_AUDIT_CHANNELS` | Comma-separated Slack channel IDs to exclude from `/tickets` audit results |
+| `IGNORED_TEAMMATE` | Comma-separated Slack user IDs whose messages should be ignored by the ✅ PR-approve flow (e.g. bots or accidental triggers) |
 | `PORT` | Server port (default: 3000) |
 
 ## Key Behaviors

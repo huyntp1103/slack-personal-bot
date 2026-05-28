@@ -612,4 +612,19 @@ describe('handleApproveReaction', () => {
     await request(app).post('/slack/events').send(approvePayload({ reaction: 'thumbsup' }));
     expect(approvePr).not.toHaveBeenCalled();
   });
+
+  test('skips approve flow when item_user is in IGNORED_TEAMMATE', async () => {
+    process.env.IGNORED_TEAMMATE = 'U0A08M586LE,UTEAMMATE,U08BE96NYE6';
+    await request(app).post('/slack/events').send(approvePayload({ item_user: 'UTEAMMATE' }));
+    expect(approvePr).not.toHaveBeenCalled();
+    expect(fetchMessage).not.toHaveBeenCalled();
+    delete process.env.IGNORED_TEAMMATE;
+  });
+
+  test('still approves when item_user is not in IGNORED_TEAMMATE', async () => {
+    process.env.IGNORED_TEAMMATE = 'U0A08M586LE,U08BE96NYE6';
+    await request(app).post('/slack/events').send(approvePayload({ item_user: 'UTEAMMATE' }));
+    expect(approvePr).toHaveBeenCalledTimes(1);
+    delete process.env.IGNORED_TEAMMATE;
+  });
 });
