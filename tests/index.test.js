@@ -546,6 +546,7 @@ describe('handleApproveReaction', () => {
   beforeEach(() => {
     delete process.env.DRY_RUN;
     fetchMessage.mockResolvedValue({
+      ts: '1712345678.901234',
       text: '<https://github.com/Everfit-io/everfit-api/pull/16391>',
     });
   });
@@ -558,6 +559,7 @@ describe('handleApproveReaction', () => {
 
   test('approves every PR when the message contains multiple links', async () => {
     fetchMessage.mockResolvedValue({
+      ts: '1712345678.901234',
       text: 'review giup em <https://github.com/Everfit-io/everfit-api/pull/100> va <https://github.com/Everfit-io/everfit-api/pull/200>',
     });
     await request(app).post('/slack/events').send(approvePayload());
@@ -568,6 +570,7 @@ describe('handleApproveReaction', () => {
 
   test('dedupes repeated PR URLs in the same message', async () => {
     fetchMessage.mockResolvedValue({
+      ts: '1712345678.901234',
       text: '<https://github.com/o/r/pull/1> and again <https://github.com/o/r/pull/1>',
     });
     await request(app).post('/slack/events').send(approvePayload());
@@ -626,5 +629,18 @@ describe('handleApproveReaction', () => {
     await request(app).post('/slack/events').send(approvePayload({ item_user: 'UTEAMMATE' }));
     expect(approvePr).toHaveBeenCalledTimes(1);
     delete process.env.IGNORED_TEAMMATE;
+  });
+
+  test('skips when reaction is on a thread reply (item ts !== fetched message ts)', async () => {
+    // event.item.ts = the reply we reacted to, but conversations.history returns
+    // the root (different ts) because thread replies aren't in channel history.
+    fetchMessage.mockResolvedValue({
+      ts: '1712345678.901234', // root
+      text: '<https://github.com/Everfit-io/everfit-api/pull/16391>',
+    });
+    await request(app).post('/slack/events').send(approvePayload({
+      item: { type: 'message', channel: 'C05F65TBB9P', ts: '1712345999.000000' }, // reply ts
+    }));
+    expect(approvePr).not.toHaveBeenCalled();
   });
 });

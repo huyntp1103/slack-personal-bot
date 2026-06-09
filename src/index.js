@@ -391,6 +391,14 @@ async function handleApproveReaction(event) {
     return;
   }
 
+  // conversations.history only returns top-level messages. If the reacted item's
+  // ts doesn't match the returned message's ts, it was a thread reply — skip so
+  // we don't accidentally approve the PR linked in the root message.
+  if (message.ts !== event.item.ts) {
+    console.log(`[Slack] ✅ on thread reply — skipping approve flow (reacted ts=${event.item.ts}, root ts=${message.ts})`);
+    return;
+  }
+
   const cleanText = (message.text || '').replace(/<([^>]+)>/g, '$1');
   const prUrls = [...new Set(cleanText.match(/https:\/\/github\.com\/[^|\s]+\/pull\/\d+/g) || [])];
   if (prUrls.length === 0) return;
