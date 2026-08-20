@@ -1,0 +1,57 @@
+.env.example
+  s_fe318e7d85085a::t_de5c8dbd48be6f 34-45
+src/index.js
+  s_fe318e7d85085a::t_579a1e04753c16 15-19
+  s_fe318e7d85085a::t_03c5e53011818a 470-473
+  s_fe318e7d85085a::t_2685137a634885 494
+  s_fe318e7d85085a::t_5dbdf671d003d3 481-482,486-487,499,502
+  s_fe318e7d85085a::t_3c584320b71aab 426-469,474-480,483-485,488-493,495-498,500-501,504-508
+  s_fe318e7d85085a::t_103c109534b8a1 8
+  s_fe318e7d85085a::t_ed058d94349b95 11
+  s_fe318e7d85085a::t_d1d1d113c0088a 503
+  s_fe318e7d85085a::t_bb83c0cee523d2 71-73
+tests/review.test.js
+  s_fe318e7d85085a::t_69cfc7b4b6b0c4 1-214
+tests/slack.test.js
+  s_fe318e7d85085a::t_003ed1922d0ed6 51-71
+tests/index.test.js
+  s_fe318e7d85085a::t_acc3df2411e031 14
+  s_fe318e7d85085a::t_864543a7469694 27
+  s_fe318e7d85085a::t_e21ea094dea56e 676-677,681
+  s_fe318e7d85085a::t_bb2806b3e45fdd 729-749
+  s_fe318e7d85085a::t_f5c54602aafb73 652-675,678-680,682-698,701-705,708-710,712-713,717-718,750-757,760-838
+  s_fe318e7d85085a::t_bfe37540bd6d04 22-24,29
+  s_fe318e7d85085a::t_b91e2a0d5d50e2 699-700,706-707,711,714-716,719-728,758-759
+src/slack.js
+  s_fe318e7d85085a::t_3c64e9f4385a8e 30-32,34-35,44-46
+  s_fe318e7d85085a::t_8013445df767f3 135
+CLAUDE.md
+  s_fe318e7d85085a::t_ace0c00f83c64c 98,100
+  s_fe318e7d85085a::t_960d02892d5992 114-115
+  s_fe318e7d85085a::t_7cee38d9d6be3f 32
+  s_fe318e7d85085a::t_4b5e03b7b1796c 99
+  s_fe318e7d85085a::t_a6ad0082550d46 92-97,101-103
+  s_fe318e7d85085a::t_533517f185ad4b 23
+  s_fe318e7d85085a::t_43b5a8f17b82ca 162-163
+  s_fe318e7d85085a::t_77eb93d9192cb2 47
+  s_fe318e7d85085a::t_34e84eaadd8c4f 116
+  s_fe318e7d85085a::t_0de1988ef16ccd 147-151
+src/review.js
+  s_fe318e7d85085a::t_090f1af366a000 1-138
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "8c12618e39b813924b62f12e6135007e7796e621",
+  "prompts": {},
+  "sessions": {
+    "s_fe318e7d85085a": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "8df87dfd-b259-4c40-a848-2f9a70cd38ca",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Huy Nguyen Nhat <huyntp1103@gmail.com>"
+    }
+  }
+}
