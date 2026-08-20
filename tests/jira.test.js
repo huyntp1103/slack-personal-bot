@@ -26,7 +26,7 @@ process.env.ID_IN_PROGRESS = '21';
 process.env.ID_IN_REVIEW = '41';
 process.env.ID_QA_READY = '51';
 
-const { transitionIssue, addComment, createWorklog } = require('../src/jira');
+const { transitionIssue, addComment, createWorklog, getIssue, getIssueSummary } = require('../src/jira');
 
 function mockIssue({ status = 'To Do', sprints = [], issueType = 'Task' } = {}) {
   mockGetIssue.mockResolvedValue({
@@ -82,6 +82,13 @@ describe('transitionIssue — status guard', () => {
     expect(mockGetIssue).not.toHaveBeenCalled();
     expect(result).toBe(false);
   });
+
+  test('transitions regardless of current status for a transition with no required status (e.g. QA Failed)', async () => {
+    mockIssue({ status: 'Literally anything' });
+    const result = await transitionIssue('UP-1', '999'); // no env var maps to '999'
+    expect(mockDoTransition).toHaveBeenCalledWith({ issueIdOrKey: 'UP-1', transition: { id: '999' } });
+    expect(result).toBe(true);
+  });
 });
 
 describe('transitionIssue — backlog sprint guard', () => {
@@ -125,6 +132,48 @@ describe('addComment', () => {
     });
   });
 
+  test('swallows API errors without throwing', async () => {
+    mockAddComment.mockRejectedValue(new Error('jira down'));
+    await expect(addComment('UP-1', 'text')).resolves.toBeUndefined();
+  });
+});
+
+describe('getIssue', () => {
+  test('passes through the Jira client response', async () => {
+    const issue = { fields: { status: { name: 'In Progress' } } };
+    mockGetIssue.mockResolvedValue(issue);
+
+    const result = await getIssue('UP-1');
+
+    expect(mockGetIssue).toHaveBeenCalledWith({ issueIdOrKey: 'UP-1' });
+    expect(result).toBe(issue);
+  });
+
+  test('propagates a rejection instead of swallowing it', async () => {
+    mockGetIssue.mockRejectedValue(new Error('not found'));
+    await expect(getIssue('UP-404')).rejects.toThrow('not found');
+  });
+});
+
+describe('getIssueSummary', () => {
+  test('returns the summary field', async () => {
+    mockGetIssue.mockResolvedValue({ fields: { summary: 'Fix the thing' } });
+    const result = await getIssueSummary('UP-1');
+    expect(mockGetIssue).toHaveBeenCalledWith({ issueIdOrKey: 'UP-1', fields: ['summary'] });
+    expect(result).toBe('Fix the thing');
+  });
+
+  test('returns null when the issue has no summary field', async () => {
+    mockGetIssue.mockResolvedValue({ fields: {} });
+    const result = await getIssueSummary('UP-1');
+    expect(result).toBeNull();
+  });
+
+  test('returns null and swallows the error on API failure', async () => {
+    mockGetIssue.mockRejectedValue(new Error('not found'));
+    const result = await getIssueSummary('UP-404');
+    expect(result).toBeNull();
+  });
 });
 
 describe('createWorklog', () => {

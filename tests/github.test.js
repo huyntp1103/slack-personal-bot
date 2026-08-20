@@ -60,6 +60,12 @@ describe('fetchPrData', () => {
     const result = await fetchPrData(PR_URL);
     expect(result).toBeNull();
   });
+
+  test('falls back to null title/baseBranch when the response omits them', async () => {
+    global.fetch.mockResolvedValue({ ok: true, json: async () => ({}) });
+    const result = await fetchPrData(PR_URL);
+    expect(result).toEqual({ title: null, baseBranch: null });
+  });
 });
 
 describe('fetchPrTitle', () => {
@@ -123,6 +129,15 @@ describe('fetchPrCommits', () => {
     global.fetch.mockRejectedValue(new Error('boom'));
     const commits = await fetchPrCommits(PR_URL);
     expect(commits).toEqual([]);
+  });
+
+  test('falls back to an empty message when the commit payload is missing it', async () => {
+    global.fetch.mockResolvedValue({
+      ok: true,
+      json: async () => ([{ author: { login: 'me' }, committer: { login: 'me' } }]),
+    });
+    const commits = await fetchPrCommits(PR_URL);
+    expect(commits).toEqual([{ message: '', authorLogin: 'me', committerLogin: 'me' }]);
   });
 });
 

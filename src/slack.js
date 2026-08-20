@@ -26,9 +26,15 @@ function buildThreadLink(channel, ts) {
  *
  * @param {string} channel - Slack channel ID
  * @param {string} ts - Thread timestamp in dot format (e.g. 1712345678.901234)
- * @param {string} text
+ * @param {string} text - also the notification/fallback text when `blocks` is set
+ * @param {{notify?: boolean, blocks?: object[]}} [opts] - notify=false suppresses
+ *   the "✅ Replied in Slack" preview, for callers that emit their own single
+ *   summary instead. The DRY_RUN preview is always emitted — it's the only output
+ *   in that mode. `blocks` renders interactive Block Kit content (e.g. the
+ *   "Review again" button); `text` stays as the fallback.
  */
-async function replyToThread(channel, ts, text) {
+async function replyToThread(channel, ts, text, opts = {}) {
+  const { notify = true, blocks } = opts;
   const threadLink = buildThreadLink(channel, ts);
   const location = threadLink ?? `Channel: \`${channel}\` Thread: \`${ts}\``;
 
@@ -37,10 +43,12 @@ async function replyToThread(channel, ts, text) {
     return;
   }
 
-  await preview(`✅ *Replied in Slack*\nThread: ${location}\nMessage: ${text}`);
+  if (notify) {
+    await preview(`✅ *Replied in Slack*\nThread: ${location}\nMessage: ${text}`);
+  }
 
   try {
-    await slack.chat.postMessage({ channel, thread_ts: ts, text });
+    await slack.chat.postMessage({ channel, thread_ts: ts, text, ...(blocks ? { blocks } : {}) });
     console.log(`[Slack] Replied to thread ${ts} in ${channel}`);
   } catch (err) {
     console.log(`[Slack] replyToThread(${channel}, ${ts}) failed:`, err.message);
@@ -126,4 +134,70 @@ async function preview(text, opts = {}) {
   }
 }
 
-module.exports = { replyToThread, fetchMessage, preview, searchMyMessages };
+/**
+ * Adds an emoji reaction to a Slack message — used to mark the original message
+ * (the one with the PR link) once the bot approves that PR on GitHub.
+ * Bot must have the reactions:write scope.
+ *
+ * @param {string} channel
+ * @param {string} ts - message timestamp in dot format
+ * @param {string} emoji - reaction name without colons, e.g. 'white_check_mark'
+ * @returns {Promise<{ok: boolean, error?: string}>} ok=true once Slack accepted
+ *   it (or it was already there) — callers use this to surface a failure
+ *   instead of it silently vanishing into server logs no one is watching.
+ */
+async function reactToMessage(channel, ts, emoji) {
+  if (process.env.DRY_RUN === 'true') {
+    await preview(`👉 *Please react :${emoji}: to this message*\nChannel: \`${channel}\` Thread: \`${ts}\``);
+    return { ok: true };
+  }
+
+  try {
+    await slack.reactions.add({ channel, timestamp: ts, name: emoji });
+    console.log(`[Slack] Reacted :${emoji}: to ${ts} in ${channel}`);
+    return { ok: true };
+  } catch (err) {
+    // Someone (or a prior run) already put this reaction there — not worth surfacing.
+    if (err.data?.error === 'already_reacted') return { ok: true };
+    console.log(`[Slack] reactToMessage(${channel}, ${ts}, ${emoji}) failed:`, err.message);
+    return { ok: false, error: err.data?.error || err.message };
+  }
+}
+
+/**
+ * Posts an ephemeral reply to a Slack interaction's `response_url` — visible only
+ * to the person who clicked, and never added to the thread. Used to tell a
+ * teammate why their "Review again" click didn't start a run.
+ *
+ * @param {string} responseUrl - payload.response_url from the interaction
+ * @param {string} text
+ * @returns {Promise<boolean>} true when Slack accepted it
+ */
+async function respondEphemeral(responseUrl, text) {
+  if (!responseUrl) return false;
+  try {
+    const res = await fetch(responseUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ response_type: 'ephemeral', replace_original: false, text }),
+    });
+    if (!res.ok) {
+      console.log(`[Slack] respondEphemeral failed: ${res.status}`);
+      return false;
+    }
+    return true;
+  } catch (err) {
+    console.log('[Slack] respondEphemeral error:', err.message);
+    return false;
+  }
+}
+
+module.exports = {
+  replyToThread,
+  fetchMessage,
+  preview,
+  reactToMessage,
+  searchMyMessages,
+  buildThreadLink,
+  respondEphemeral,
+};
