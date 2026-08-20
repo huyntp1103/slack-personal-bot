@@ -48,6 +48,27 @@ describe('replyToThread — preview link', () => {
     expect(previewText).toContain('1778214715.118289');
   });
 
+  test('notify: false skips the "Replied in Slack" preview but still replies', async () => {
+    await replyToThread('C0APHQYK456', '1778214715.118289', 'hello', { notify: false });
+
+    expect(mockPostMessage).toHaveBeenCalledTimes(1);
+    expect(mockPostMessage.mock.calls[0][0]).toEqual({
+      channel: 'C0APHQYK456',
+      thread_ts: '1778214715.118289',
+      text: 'hello',
+    });
+  });
+
+  test('notify: false still previews under DRY_RUN — it is the only output there', async () => {
+    process.env.DRY_RUN = 'true';
+
+    await replyToThread('C0APHQYK456', '1778214715.118289', 'hello', { notify: false });
+
+    expect(mockPostMessage).toHaveBeenCalledTimes(1);
+    expect(mockPostMessage.mock.calls[0][0].channel).toBe('C_PREVIEW');
+    expect(mockPostMessage.mock.calls[0][0].text).toContain('hello');
+  });
+
   test('still posts the real reply when DRY_RUN is not true', async () => {
     process.env.SLACK_WORKSPACE = 'everfit';
 

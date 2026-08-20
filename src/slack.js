@@ -27,8 +27,12 @@ function buildThreadLink(channel, ts) {
  * @param {string} channel - Slack channel ID
  * @param {string} ts - Thread timestamp in dot format (e.g. 1712345678.901234)
  * @param {string} text
+ * @param {{notify?: boolean}} [opts] - notify=false suppresses the "✅ Replied in
+ *   Slack" preview, for callers that emit their own single summary instead. The
+ *   DRY_RUN preview is always emitted — it's the only output in that mode.
  */
-async function replyToThread(channel, ts, text) {
+async function replyToThread(channel, ts, text, opts = {}) {
+  const { notify = true } = opts;
   const threadLink = buildThreadLink(channel, ts);
   const location = threadLink ?? `Channel: \`${channel}\` Thread: \`${ts}\``;
 
@@ -37,7 +41,9 @@ async function replyToThread(channel, ts, text) {
     return;
   }
 
-  await preview(`✅ *Replied in Slack*\nThread: ${location}\nMessage: ${text}`);
+  if (notify) {
+    await preview(`✅ *Replied in Slack*\nThread: ${location}\nMessage: ${text}`);
+  }
 
   try {
     await slack.chat.postMessage({ channel, thread_ts: ts, text });
@@ -126,4 +132,4 @@ async function preview(text, opts = {}) {
   }
 }
 
-module.exports = { replyToThread, fetchMessage, preview, searchMyMessages };
+module.exports = { replyToThread, fetchMessage, preview, searchMyMessages, buildThreadLink };

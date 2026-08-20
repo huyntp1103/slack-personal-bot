@@ -11,6 +11,7 @@ jest.mock('../src/slack', () => ({
   fetchMessage: jest.fn(),
   preview: jest.fn(),
   searchMyMessages: jest.fn(),
+  buildThreadLink: jest.fn(),
 }));
 jest.mock('../src/github', () => ({
   fetchPrData: jest.fn(),
@@ -18,10 +19,15 @@ jest.mock('../src/github', () => ({
   fetchPrCommits: jest.fn(),
   approvePr: jest.fn(),
 }));
+jest.mock('../src/review', () => ({
+  runPrReview: jest.fn(),
+  reviewSkipReason: jest.fn(),
+}));
 
 const { transitionIssue, addComment, getIssue, getIssueSummary } = require('../src/jira');
-const { fetchMessage, searchMyMessages, preview } = require('../src/slack');
+const { fetchMessage, searchMyMessages, preview, replyToThread, buildThreadLink } = require('../src/slack');
 const { fetchPrData, fetchPrTitle, fetchPrCommits, approvePr } = require('../src/github');
+const { runPrReview, reviewSkipReason } = require('../src/review');
 
 process.env.MY_SLACK_USER_ID = 'U093ZDNQJF3';
 process.env.SLACK_REVIEW_CHANNEL = 'C05F65TBB9P';
@@ -642,5 +648,311 @@ describe('handleApproveReaction', () => {
       item: { type: 'message', channel: 'C05F65TBB9P', ts: '1712345999.000000' }, // reply ts
     }));
     expect(approvePr).not.toHaveBeenCalled();
+  });
+});
+
+// ─── handleReviewRequestReaction (👀 → Claude Code review) ─────────────────────
+
+const REVIEW_PR_URL = 'https://github.com/Everfit-io/everfit-api/pull/18647';
+const REVIEW_COMMENT_URL = `${REVIEW_PR_URL}#issuecomment-5350479923`;
+
+function eyesPayload(overrides = {}) {
+  return {
+    type: 'event_callback',
+    event: {
+      type: 'reaction_added',
+      user: 'U093ZDNQJF3',      // me
+      reaction: 'eyes',
+      item_user: 'UTEAMMATE',
+      item: {
+        type: 'message',
+        channel: 'C05F65TBB9P', // SLACK_REVIEW_CHANNEL
+        ts: '1712345678.901234',
+      },
+      ...overrides,
+    },
+  };
+}
+
+const REVIEW_THREAD_LINK = 'https://everfit.slack.com/archives/C05F65TBB9P/p1712345678901234';
+const REVIEW_DIGEST = [
+  '*Key findings (2 total):*',
+  '',
+  '🔴 *P1 — Must verify before ship*',
+  '#1 Localization keys missing from the catalog → raw key strings in push',
+  '',
+  '🟡 *P2 — Should fix*',
+  '#2 Empty actor name fires a malformed notification',
+].join('\n');
+
+describe('handleReviewRequestReaction', () => {
+  beforeEach(() => {
+    replyToThread.mockResolvedValue(undefined);
+    buildThreadLink.mockReturnValue(REVIEW_THREAD_LINK);
+    reviewSkipReason.mockReturnValue(null); // reviewable by default
+    runPrReview.mockResolvedValue({
+      ok: true,
+      commentUrl: REVIEW_COMMENT_URL,
+      counts: { high: 2, medium: 3, low: 1 },
+      summary: REVIEW_DIGEST,
+    });
+    fetchMessage.mockResolvedValue({
+      ts: '1712345678.901234',
+      text: `review giup em <${REVIEW_PR_URL}>`,
+    });
+  });
+
+  test('announces the review, runs it, then posts the comment URL in the thread', async () => {
+    await request(app).post('/slack/events').send(eyesPayload());
+
+    expect(runPrReview).toHaveBeenCalledTimes(1);
+    expect(runPrReview).toHaveBeenCalledWith(REVIEW_PR_URL);
+
+    expect(replyToThread).toHaveBeenNthCalledWith(
+      1,
+      'C05F65TBB9P',
+      '1712345678.901234',
+      'Starting code review for PR #18647. Will post results here shortly.',
+      { notify: false }
+    );
+    expect(replyToThread).toHaveBeenNthCalledWith(
+      2,
+      'C05F65TBB9P',
+      '1712345678.901234',
+      `The review is complete; please view it <${REVIEW_COMMENT_URL}|here>.\n\n${REVIEW_DIGEST}`,
+      { notify: false }
+    );
+  });
+
+  test('renders the comment URL as a Slack link label, not a raw URL', async () => {
+    const doneText = () => replyToThread.mock.calls[1][2];
+    await request(app).post('/slack/events').send(eyesPayload());
+
+    expect(doneText()).toContain(`<${REVIEW_COMMENT_URL}|here>`);
+    expect(doneText()).not.toContain(`at ${REVIEW_COMMENT_URL}`);
+  });
+
+  test('appends the run\'s findings digest below the link', async () => {
+    await request(app).post('/slack/events').send(eyesPayload());
+
+    const doneText = replyToThread.mock.calls[1][2];
+    expect(doneText).toContain('*Key findings (2 total):*');
+    expect(doneText).toContain('🔴 *P1 — Must verify before ship*');
+    expect(doneText).toContain('#2 Empty actor name fires a malformed notification');
+    // Digest wins over the bare counts when both are present.
+    expect(doneText).not.toContain('High ·');
+  });
+
+  test('falls back to per-severity counts when the run sent no digest', async () => {
+    runPrReview.mockResolvedValue({
+      ok: true,
+      commentUrl: REVIEW_COMMENT_URL,
+      counts: { high: 0, medium: 4, low: 0 },
+      summary: null,
+    });
+    await request(app).post('/slack/events').send(eyesPayload());
+
+    expect(replyToThread.mock.calls[1][2]).toContain('(🔴 0 High · 🟡 4 Medium · 🟢 0 Low)');
+  });
+
+  test('omits the recap entirely when the run reported neither', async () => {
+    runPrReview.mockResolvedValue({
+      ok: true, commentUrl: REVIEW_COMMENT_URL, counts: null, summary: null,
+    });
+    await request(app).post('/slack/events').send(eyesPayload());
+
+    expect(replyToThread.mock.calls[1][2]).toBe(
+      `The review is complete; please view it <${REVIEW_COMMENT_URL}|here>.`
+    );
+  });
+
+  test('shows a "ready to merge" badge so the team can approve manually', async () => {
+    runPrReview.mockResolvedValue({
+      ok: true,
+      commentUrl: REVIEW_COMMENT_URL,
+      counts: { high: 0, medium: 0, low: 1 },
+      summary: REVIEW_DIGEST,
+      verdict: { verdict: 'APPROVE', reason: 'no blocking issues found', label: '✅ Ready to merge' },
+    });
+    await request(app).post('/slack/events').send(eyesPayload());
+
+    const doneText = replyToThread.mock.calls[1][2];
+    expect(doneText).toBe(
+      `The review is complete; please view it <${REVIEW_COMMENT_URL}|here>.\n*✅ Ready to merge* — no blocking issues found\n\n${REVIEW_DIGEST}`
+    );
+  });
+
+  test('shows the verdict badge even when nothing was posted (all Confirmed Safe)', async () => {
+    runPrReview.mockResolvedValue({
+      ok: true,
+      commentUrl: null,
+      counts: { high: 0, medium: 0, low: 0 },
+      summary: null,
+      verdict: { verdict: 'APPROVE', reason: 'clean pass, nothing to flag', label: '✅ Ready to merge' },
+    });
+    await request(app).post('/slack/events').send(eyesPayload());
+
+    expect(replyToThread.mock.calls[1][2]).toBe(
+      'The review is complete — no findings to post.\n*✅ Ready to merge* — clean pass, nothing to flag'
+    );
+  });
+
+  test('shows a "needs changes" badge without a reason', async () => {
+    runPrReview.mockResolvedValue({
+      ok: true,
+      commentUrl: REVIEW_COMMENT_URL,
+      counts: null,
+      summary: null,
+      verdict: { verdict: 'REQUEST_CHANGES', reason: null, label: '🚫 Needs changes' },
+    });
+    await request(app).post('/slack/events').send(eyesPayload());
+
+    expect(replyToThread.mock.calls[1][2]).toBe(
+      `The review is complete; please view it <${REVIEW_COMMENT_URL}|here>.\n*🚫 Needs changes*`
+    );
+  });
+
+  test('omits the verdict badge when the run reported none', async () => {
+    runPrReview.mockResolvedValue({
+      ok: true, commentUrl: REVIEW_COMMENT_URL, counts: null, summary: null, verdict: null,
+    });
+    await request(app).post('/slack/events').send(eyesPayload());
+
+    expect(replyToThread.mock.calls[1][2]).toBe(
+      `The review is complete; please view it <${REVIEW_COMMENT_URL}|here>.`
+    );
+  });
+
+  test('emits no preview at all on success — the thread reply is the only output', async () => {
+    await request(app).post('/slack/events').send(eyesPayload());
+
+    // Both replies pass notify: false, so replyToThread contributes no previews either.
+    expect(replyToThread.mock.calls.every(c => c[3]?.notify === false)).toBe(true);
+    expect(preview).not.toHaveBeenCalled();
+  });
+
+  test('failure preview links back to the reacted Slack thread, shortened', async () => {
+    runPrReview.mockResolvedValue({ ok: false, error: 'boom' });
+    await request(app).post('/slack/events').send(eyesPayload());
+
+    expect(buildThreadLink).toHaveBeenCalledWith('C05F65TBB9P', '1712345678.901234');
+    expect(preview.mock.calls[0][0]).toContain(`<${REVIEW_THREAD_LINK}|Go to thread>`);
+  });
+
+  test('failure preview omits the thread line when SLACK_WORKSPACE is unset', async () => {
+    buildThreadLink.mockReturnValue(null);
+    runPrReview.mockResolvedValue({ ok: false, error: 'boom' });
+    await request(app).post('/slack/events').send(eyesPayload());
+
+    expect(preview.mock.calls[0][0]).not.toContain('Go to thread');
+  });
+
+  test('says nothing was posted when the review found nothing', async () => {
+    runPrReview.mockResolvedValue({ ok: true, commentUrl: null, counts: { high: 0, medium: 0, low: 0 } });
+    await request(app).post('/slack/events').send(eyesPayload());
+
+    expect(replyToThread).toHaveBeenNthCalledWith(
+      2,
+      'C05F65TBB9P',
+      '1712345678.901234',
+      'The review is complete — no findings to post.',
+      { notify: false }
+    );
+  });
+
+  test('reports failures to the preview channel only, not the team thread', async () => {
+    runPrReview.mockResolvedValue({ ok: false, error: 'claude exited 1: boom' });
+    await request(app).post('/slack/events').send(eyesPayload());
+
+    expect(replyToThread).toHaveBeenCalledTimes(1); // only the "starting" reply
+    const previewText = preview.mock.calls.map(c => c[0]).join('\n');
+    expect(previewText).toContain('Code review failed');
+    expect(previewText).toContain('claude exited 1: boom');
+  });
+
+  test('reviews every PR linked in the message, deduped', async () => {
+    fetchMessage.mockResolvedValue({
+      ts: '1712345678.901234',
+      text: 'em co 2 PR <https://github.com/Everfit-io/everfit-api/pull/100> va <https://github.com/Everfit-io/everfit-api/pull/200> va lai <https://github.com/Everfit-io/everfit-api/pull/100>',
+    });
+    await request(app).post('/slack/events').send(eyesPayload());
+
+    expect(runPrReview).toHaveBeenCalledTimes(2);
+    expect(runPrReview).toHaveBeenCalledWith('https://github.com/Everfit-io/everfit-api/pull/100');
+    expect(runPrReview).toHaveBeenCalledWith('https://github.com/Everfit-io/everfit-api/pull/200');
+  });
+
+  test('reviews my own message too (👀 is not routed by item_user)', async () => {
+    await request(app).post('/slack/events').send(eyesPayload({ item_user: 'U093ZDNQJF3' }));
+    expect(runPrReview).toHaveBeenCalledTimes(1);
+  });
+
+  test('ignores 👀 from other users', async () => {
+    await request(app).post('/slack/events').send(eyesPayload({ user: 'UOTHER' }));
+    expect(runPrReview).not.toHaveBeenCalled();
+  });
+
+  test('ignores 👀 outside SLACK_REVIEW_CHANNEL', async () => {
+    await request(app).post('/slack/events').send(
+      eyesPayload({ item: { type: 'message', channel: 'COTHER', ts: '1.2' } })
+    );
+    expect(runPrReview).not.toHaveBeenCalled();
+  });
+
+  test('ignores messages without a GitHub PR link', async () => {
+    fetchMessage.mockResolvedValue({ ts: '1712345678.901234', text: 'just a normal chat' });
+    await request(app).post('/slack/events').send(eyesPayload());
+    expect(runPrReview).not.toHaveBeenCalled();
+    expect(replyToThread).not.toHaveBeenCalled();
+  });
+
+  test('skips when 👀 is on a thread reply (item ts !== fetched message ts)', async () => {
+    await request(app).post('/slack/events').send(eyesPayload({
+      item: { type: 'message', channel: 'C05F65TBB9P', ts: '1712345999.000000' },
+    }));
+    expect(runPrReview).not.toHaveBeenCalled();
+  });
+
+  test('does not approve the PR — 👀 only reviews', async () => {
+    await request(app).post('/slack/events').send(eyesPayload());
+    expect(approvePr).not.toHaveBeenCalled();
+    expect(transitionIssue).not.toHaveBeenCalled();
+  });
+
+  test('ignores a second 👀 while the same PR is still under review', async () => {
+    let finishFirst;
+    runPrReview.mockImplementationOnce(() => new Promise(resolve => {
+      finishFirst = () => resolve({ ok: true, commentUrl: REVIEW_COMMENT_URL });
+    }));
+
+    const first = request(app).post('/slack/events').send(eyesPayload());
+    // Let the first run reach runPrReview before the duplicate arrives.
+    await new Promise(resolve => setImmediate(resolve));
+    await request(app).post('/slack/events').send(eyesPayload());
+
+    expect(runPrReview).toHaveBeenCalledTimes(1);
+
+    finishFirst();
+    await first;
+  });
+
+  test('skips a disallowed repo without ever announcing the review in the thread', async () => {
+    reviewSkipReason.mockReturnValue(
+      '"everfit-cms" is not in REVIEW_ALLOWED_REPOS (everfit-api, file-service)'
+    );
+    await request(app).post('/slack/events').send(eyesPayload());
+
+    expect(runPrReview).not.toHaveBeenCalled();
+    expect(replyToThread).not.toHaveBeenCalled(); // no dangling "Starting code review"
+    expect(preview).toHaveBeenCalledTimes(1);
+    expect(preview.mock.calls[0][0]).toContain('Code review skipped');
+    expect(preview.mock.calls[0][0]).toContain('not in REVIEW_ALLOWED_REPOS');
+  });
+
+  test('skip preview still links back to the reacted thread', async () => {
+    reviewSkipReason.mockReturnValue('no local clone for "everfit-cms"');
+    await request(app).post('/slack/events').send(eyesPayload());
+
+    expect(preview.mock.calls[0][0]).toContain(`<${REVIEW_THREAD_LINK}|Go to thread>`);
   });
 });

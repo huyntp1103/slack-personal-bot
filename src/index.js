@@ -5,12 +5,18 @@ require('dotenv').config();
 const crypto = require('crypto');
 const express = require('express');
 const { transitionIssue, addComment, getIssue, getIssueSummary } = require('./jira');
-const { replyToThread, fetchMessage, searchMyMessages, preview } = require('./slack');
+const { replyToThread, fetchMessage, searchMyMessages, preview, buildThreadLink } = require('./slack');
 const { extractJiraKey, extractAllJiraKeys, extractSlackThread } = require('./utils');
 const { fetchPrTitle, fetchPrData, fetchPrCommits, approvePr } = require('./github');
+const { runPrReview, reviewSkipReason } = require('./review');
 
 const ALLOWED_BASE_BRANCHES = ['develop', 'releasing_staging', 'main', 'master'];
 const NOTIFY_BASE_BRANCHES = ['develop', 'releasing_staging'];
+const REVIEW_REACTION = 'eyes';
+
+// PR URLs with a Claude review currently running — a second 👀 on the same PR is
+// ignored until the first run finishes (reviews take minutes and post to GitHub).
+const reviewsInFlight = new Set();
 
 const app = express();
 
@@ -62,6 +68,9 @@ app.post('/slack/events', async (req, res) => {
     } else {
       await handleApproveReaction(event);
     }
+  } else if (event.type === 'reaction_added' && event.reaction === REVIEW_REACTION) {
+    // 👀 on any message → run Claude Code's review-pr skill on the linked PR(s)
+    await handleReviewRequestReaction(event);
   }
 });
 
@@ -411,6 +420,126 @@ async function handleApproveReaction(event) {
       `${ok ? '✅' : '⚠️'} *PR ${ok ? 'approved' : 'approve failed'}*\n<${url}|${url}>`,
       { tag: false }
     );
+  }
+}
+
+/**
+ * 👀 reaction on a message in #backend-review-code → run Claude Code's `review-pr`
+ * skill against every GitHub PR linked in that message.
+ *
+ * Per PR: reply in the message's thread that the review started, run
+ * `claude -p "/review-pr <n>"` in the local clone (it posts 🔴 High + 🟡 Medium
+ * findings to the PR itself), then reply again with the comment URL and ping me in
+ * SLACK_PREVIEW_CHANNEL.
+ */
+async function handleReviewRequestReaction(event) {
+  if (event.user !== process.env.MY_SLACK_USER_ID) return;
+  if (event.item.type !== 'message') return;
+  if (event.item.channel !== process.env.SLACK_REVIEW_CHANNEL) return;
+
+  const message = await fetchMessage(event.item.channel, event.item.ts);
+  if (!message) {
+    console.warn('[Slack] 👀 — could not fetch original message');
+    return;
+  }
+
+  // conversations.history only returns top-level messages, so a ts mismatch means
+  // the reaction was on a thread reply — don't review the root message's PR.
+  if (message.ts !== event.item.ts) {
+    console.log(`[Slack] 👀 on thread reply — skipping review (reacted ts=${event.item.ts}, root ts=${message.ts})`);
+    return;
+  }
+
+  const cleanText = (message.text || '').replace(/<([^>]+)>/g, '$1');
+  const prUrls = [...new Set(cleanText.match(/https:\/\/github\.com\/[^|\s]+\/pull\/\d+/g) || [])];
+  if (prUrls.length === 0) {
+    console.log('[Slack] 👀 — no PR URL in message');
+    return;
+  }
+
+  console.log(`[Slack] 👀 — reviewing ${prUrls.length} PR(s)`);
+
+  for (const prUrl of prUrls) {
+    await runReviewForPr(prUrl, event.item.channel, event.item.ts);
+  }
+}
+
+/**
+ * The findings recap appended to the completion message: the run's own
+ * Slack-formatted digest when it produced one, otherwise a bare per-severity
+ * count. Returns '' when the run reported neither — we never invent zeros.
+ */
+function formatFindingsSummary({ summary, counts }) {
+  if (summary) return `\n\n${summary}`;
+  if (counts) return ` (🔴 ${counts.high} High · 🟡 ${counts.medium} Medium · 🟢 ${counts.low} Low)`;
+  return '';
+}
+
+/**
+ * The verdict badge line — e.g. `✅ *Ready to merge* — no blocking issues found.`
+ * This is advisory only (the run never approves on GitHub); it just flags for
+ * the team whether a human can go approve it. Returns '' when the run reported
+ * no verdict.
+ */
+function formatVerdictLine(verdict) {
+  if (!verdict) return '';
+  return verdict.reason
+    ? `\n*${verdict.label}* — ${verdict.reason}`
+    : `\n*${verdict.label}*`;
+}
+
+async function runReviewForPr(prUrl, channel, threadTs) {
+  const prNumber = prUrl.match(/\/pull\/(\d+)/)?.[1];
+
+  // Clickable jump back to the reacted message. Empty when SLACK_WORKSPACE is unset.
+  const threadLink = buildThreadLink(channel, threadTs);
+  const threadLine = threadLink ? `\n<${threadLink}|Go to thread>` : '';
+
+  if (reviewsInFlight.has(prUrl)) {
+    console.log(`[Review] PR #${prNumber} already under review — ignoring duplicate 👀`);
+    return;
+  }
+
+  // Check restrictions (allowed repo, local clone present) before announcing
+  // anything in the team thread — an unreviewable PR should never leave a
+  // dangling "Starting code review" with no follow-up.
+  const skipReason = reviewSkipReason(prUrl);
+  if (skipReason) {
+    console.log(`[Review] skipping PR #${prNumber}: ${skipReason}`);
+    await preview(`⏭️ *Code review skipped* — PR <${prUrl}|#${prNumber}>\n\`${skipReason}\`${threadLine}`);
+    return;
+  }
+
+  reviewsInFlight.add(prUrl);
+
+  try {
+    // notify: false on both replies — suppresses the per-reply "✅ Replied in
+    // Slack" preview. On success the team thread reply is the only output;
+    // only a failure additionally pings the preview channel (see below).
+    await replyToThread(
+      channel,
+      threadTs,
+      `Starting code review for PR #${prNumber}. Will post results here shortly.`,
+      { notify: false }
+    );
+
+    const result = await runPrReview(prUrl);
+
+    if (!result.ok) {
+      // Failures stay in my preview channel — no half-finished status in the team thread.
+      await preview(`⚠️ *Code review failed* — PR <${prUrl}|#${prNumber}>\n\`${result.error}\`${threadLine}`);
+      return;
+    }
+
+    // Nothing posted → the digest/counts recap would be redundant noise (and,
+    // with a stale `counts: {0,0,0}`, misleading); only the verdict still applies.
+    const doneText = result.commentUrl
+      ? `The review is complete; please view it <${result.commentUrl}|here>.${formatVerdictLine(result.verdict)}${formatFindingsSummary(result)}`
+      : `The review is complete — no findings to post.${formatVerdictLine(result.verdict)}`;
+
+    await replyToThread(channel, threadTs, doneText, { notify: false });
+  } finally {
+    reviewsInFlight.delete(prUrl);
   }
 }
 
