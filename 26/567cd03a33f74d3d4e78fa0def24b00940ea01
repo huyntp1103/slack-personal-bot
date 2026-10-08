@@ -1,0 +1,77 @@
+src/review.js
+  s_38f358ac1aa338::t_6321e9ce709356 230-234
+  s_38f358ac1aa338::t_a2062bd04b8fec 329-334
+  s_38f358ac1aa338::t_1aafe4f4edc66e 13-34
+  s_38f358ac1aa338::t_4051ca1ab398c9 335
+  s_38f358ac1aa338::t_cec17bf5231dd1 286-288
+  s_38f358ac1aa338::t_cf4a51e2576b70 336-342
+CLAUDE.md
+  s_06cfc6d201950f::t_b7817537d2bfad 102
+  s_06cfc6d201950f::t_3841e46571c69f 101
+  s_06cfc6d201950f::t_63764ea7075da4 111-116
+  s_38f358ac1aa338::t_a0fb8e1f4ffd20 166
+  s_38f358ac1aa338::t_05aa1f777506d0 182
+  s_06cfc6d201950f::t_5cc44fc67d25b3 50
+src/slack.js
+  s_06cfc6d201950f::t_498e2160379484 167-194
+  s_06cfc6d201950f::t_d45e871dbdc340 195-196,202-204,209-211,215-224,226-233
+  s_06cfc6d201950f::t_e9480acfe22dd9 267
+  s_06cfc6d201950f::t_8ee59a07c6c896 268
+  s_06cfc6d201950f::t_7cd234475daf26 197-201,205-208,212-214,225
+tests/review.test.js
+  s_38f358ac1aa338::t_91fe06f0438f12 323
+  s_38f358ac1aa338::t_00685c063a5706 419-437,486-507
+  s_38f358ac1aa338::t_22da10efa063e0 438-455
+  s_38f358ac1aa338::t_a78df79d6c494b 456-485
+src/index.js
+  s_06cfc6d201950f::t_4e503f837ea00c 482-495,509-520
+  s_06cfc6d201950f::t_58a092da0caedb 85-87
+  s_06cfc6d201950f::t_e9201eb800085f 8
+  s_06cfc6d201950f::t_24fe821924ca49 16
+  s_06cfc6d201950f::t_cbea05128b68f6 808-813
+  s_06cfc6d201950f::t_17be4ada17c33e 814
+  s_06cfc6d201950f::t_b5cb2d650f4f0e 496-508
+  s_06cfc6d201950f::t_f419ea3ebf7703 481
+tests/index.test.js
+  s_06cfc6d201950f::t_0a8af8dae33e30 1935
+  s_06cfc6d201950f::t_83c94845256e1a 1031-1032,1037-1040
+  s_06cfc6d201950f::t_5a862ea5c2b609 1030,1033-1036
+  s_06cfc6d201950f::t_a64ca9571d6814 32
+  s_06cfc6d201950f::t_647952c1a8775f 1934
+  s_06cfc6d201950f::t_792ebd15eee56c 1205
+  s_06cfc6d201950f::t_fa0a28c5a8feae 17
+  s_06cfc6d201950f::t_7bd7d570f67474 1206
+  s_06cfc6d201950f::t_f7a50f8adca5b9 85
+  s_06cfc6d201950f::t_cdd5d6661e855e 1492-1495
+  s_06cfc6d201950f::t_efe1b5580e1a07 1451-1491,1496-1548
+tests/slack.test.js
+  s_06cfc6d201950f::t_3df7cce0a6d0dc 94
+  s_06cfc6d201950f::t_c9f11f45e6627d 180-223
+  s_06cfc6d201950f::t_ef578093524717 8,12,23,25
+  s_06cfc6d201950f::t_698557e8f9cb23 5,13,19,26
+  s_06cfc6d201950f::t_b852ccc4e081c9 224-283
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "26567cd03a33f74d3d4e78fa0def24b00940ea01",
+  "prompts": {},
+  "sessions": {
+    "s_06cfc6d201950f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e143b0f8-c5fd-49ad-9f1d-23fabc6c9b67",
+        "model": "claude-sonnet-5"
+      },
+      "human_author": "Huy Nguyen Nhat <huyntp1103@gmail.com>"
+    },
+    "s_38f358ac1aa338": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "eb7e43c9-09ce-436f-b09d-68485152e2d7",
+        "model": "claude-sonnet-5"
+      },
+      "human_author": "Huy Nguyen Nhat <huyntp1103@gmail.com>"
+    }
+  }
+}
