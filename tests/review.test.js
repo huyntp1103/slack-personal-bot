@@ -320,6 +320,7 @@ describe('runPrReview', () => {
     expect(args).toContain('--append-system-prompt');
     expect(args[args.indexOf('--permission-mode') + 1]).toBe('bypassPermissions');
     expect(opts.cwd).toBe(path.join(REPO_ROOT, 'everfit-api'));
+    expect(opts.stdio).toEqual(['ignore', 'pipe', 'pipe']);
 
     child.stdout.emit('data', [
       'done',
@@ -413,6 +414,95 @@ describe('runPrReview', () => {
     const result = await promise;
     expect(result.ok).toBe(false);
     expect(result.error).toMatch(/claude exited 1: gh: PR not found/);
+  });
+
+  test('strips stdin/SessionEnd-hook noise out of the reported error tail', async () => {
+    const child = fakeChild();
+    spawn.mockReturnValue(child);
+
+    const promise = runPrReview(PR_URL);
+    child.stderr.emit('data', [
+      'no permission for tool X, use Edit(...) instead',
+      'Warning: no stdin data received in 3s, proceeding without it.',
+      'SessionEnd hook ["node" "weave-telemetry.js"] failed: Hook cancelled',
+    ].join('\n'));
+    child.emit('close', 1);
+
+    const result = await promise;
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain('no permission for tool X, use Edit(...) instead');
+    expect(result.error).not.toMatch(/no stdin data received/);
+    expect(result.error).not.toMatch(/SessionEnd hook/);
+  });
+
+  test('keeps a several-hundred-char error intact instead of cutting it off mid-sentence', async () => {
+    const child = fakeChild();
+    spawn.mockReturnValue(child);
+    const trustMessage = [
+      'Ignoring 2 permissions.additionalDirectories entries from .claude/settings.json:',
+      'this workspace has not been trusted. Run Claude Code interactively here once and',
+      'accept the trust dialog, or set projects["/Users/me/Everfit/everfit-ai-api"]',
+      '.hasTrustDialogAccepted: true in /Users/me/.claude.json.',
+    ].join(' ');
+
+    const promise = runPrReview(PR_URL);
+    child.stderr.emit('data', trustMessage);
+    child.emit('close', 1);
+
+    const result = await promise;
+    expect(result.error).toBe(`claude exited 1: ${trustMessage}`);
+  });
+
+  test('logs the stdout transcript locally when a run fails with no result marker', async () => {
+    const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    const child = fakeChild();
+    spawn.mockReturnValue(child);
+
+    const promise = runPrReview(PR_URL);
+    child.stdout.emit('data', 'Phase A: reading the diff...\nPhase B: found one issue...');
+    child.stderr.emit('data', 'SessionEnd hook ["node" "weave-telemetry.js"] failed: Hook cancelled');
+    child.emit('close', 1);
+    await promise;
+
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining(PR_URL));
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('Phase B: found one issue'));
+    errorSpy.mockRestore();
+  });
+
+  test('does not log a stdout transcript when the run produced no stdout at all', async () => {
+    const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    const child = fakeChild();
+    spawn.mockReturnValue(child);
+
+    const promise = runPrReview(PR_URL);
+    child.stderr.emit('data', 'gh: PR not found');
+    child.emit('close', 1);
+    await promise;
+
+    expect(errorSpy).not.toHaveBeenCalled();
+    errorSpy.mockRestore();
+  });
+
+  test('treats a non-zero exit as success once the review already posted its final markers', async () => {
+    const child = fakeChild();
+    spawn.mockReturnValue(child);
+
+    const promise = runPrReview(PR_URL);
+    child.stdout.emit('data', [
+      'done',
+      'REVIEW_COUNTS=high=0,medium=0,low=0',
+      'REVIEW_VERDICT=APPROVE: no blocking issues found',
+      `REVIEW_RESULT=${PR_URL}#issuecomment-1`,
+    ].join('\n'));
+    child.stderr.emit('data', 'SessionEnd hook ["node" "weave-telemetry.js"] failed: Hook cancelled');
+    child.emit('close', 1);
+
+    const result = await promise;
+    expect(result).toMatchObject({
+      ok: true,
+      commentUrl: `${PR_URL}#issuecomment-1`,
+      verdict: { verdict: 'APPROVE' },
+    });
   });
 
   test('reports spawn errors (e.g. claude not on PATH)', async () => {

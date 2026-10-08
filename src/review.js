@@ -10,6 +10,28 @@ const VERDICT_MARKER = 'REVIEW_VERDICT=';
 const SUMMARY_START = 'REVIEW_SUMMARY_START';
 const SUMMARY_END = 'REVIEW_SUMMARY_END';
 
+// Boilerplate that the local `claude` CLI/session machinery can print or fail on —
+// unrelated to whether the review itself worked, but noisy enough to push the
+// actual error out of the 500-char stderr tail we report. Stripped before truncating.
+const NOISE_LINE_PATTERNS = [
+  /^Warning: no stdin data received/,
+  /^SessionEnd hook \[.*\] failed:/,
+];
+
+/**
+ * Drops known-noisy boilerplate lines (hook warnings, stdin prompts) from CLI
+ * output before it's truncated for a Slack-facing error message.
+ *
+ * @param {string} text
+ * @returns {string}
+ */
+function stripNoise(text) {
+  return String(text || '')
+    .split('\n')
+    .filter(line => !NOISE_LINE_PATTERNS.some(re => re.test(line.trim())))
+    .join('\n');
+}
+
 // PR URL → the currently running review's cancel handle, so a "Cancel review"
 // click can find and kill the right `claude` process. Populated once the
 // process actually spawns, cleared as soon as it closes (cancelled or not).
@@ -205,6 +227,11 @@ function extractVerdict(output) {
 // Slack rejects messages over 40k chars; keep the digest well under that.
 const MAX_SUMMARY_CHARS = 2800;
 
+// A real CLI error (e.g. an unaccepted trust dialog) can run several hundred
+// chars once it repeats itself across two advisory lines — 500 was cutting the
+// actual reason off mid-sentence. Generous but still bounded for the preview post.
+const MAX_ERROR_TAIL_CHARS = 2000;
+
 /**
  * Pulls the Slack-formatted findings digest out of the run's stdout — the text
  * between the REVIEW_SUMMARY_START / REVIEW_SUMMARY_END markers.
@@ -256,7 +283,9 @@ function runPrReview(prUrl) {
   return new Promise(resolve => {
     let child;
     try {
-      child = spawn(bin, args, { cwd: repoPath, env: process.env });
+      // stdin is ignored: `claude -p` never reads it, and leaving the pipe open makes
+      // the CLI stall ~3s waiting for input before proceeding, on every single run.
+      child = spawn(bin, args, { cwd: repoPath, env: process.env, stdio: ['ignore', 'pipe', 'pipe'] });
     } catch (err) {
       return resolve({ ok: false, error: err.message, repoPath });
     }
@@ -297,8 +326,20 @@ function runPrReview(prUrl) {
       if (timedOut) {
         return resolve({ ok: false, error: `review timed out after ${timeoutMinutes} min`, output: stdout, repoPath });
       }
-      if (code !== 0) {
-        const tail = (stderr || stdout).trim().slice(-500);
+      // A non-zero exit after the model already emitted its final marker block means
+      // the review itself completed (and possibly already posted to GitHub) — the
+      // failure happened during unrelated session teardown (e.g. a SessionEnd hook),
+      // not the review. Treat it as a success rather than discarding real output.
+      if (code !== 0 && !stdout.includes(RESULT_MARKER)) {
+        const cleaned = stripNoise(stderr || stdout).trim();
+        const tail = (cleaned || (stderr || stdout).trim()).slice(-MAX_ERROR_TAIL_CHARS);
+        // The Slack-facing error is just the stderr tail — if the model got partway
+        // through the review before dying, that stdout transcript is otherwise lost.
+        // Logged locally only (never posted to Slack): it can be long and is only
+        // useful for debugging at the terminal.
+        if (stdout.trim()) {
+          console.error(`[Review] PR ${prUrl} exited ${code} with no result marker — stdout was:\n${stdout}`);
+        }
         return resolve({ ok: false, error: `claude exited ${code}: ${tail}`, output: stdout, repoPath });
       }
       resolve({

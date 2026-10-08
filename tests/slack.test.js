@@ -2,24 +2,28 @@
 
 const mockPostMessage = jest.fn();
 const mockHistory = jest.fn();
+const mockReplies = jest.fn();
 const mockReactionsAdd = jest.fn();
 const mockSearchMessages = jest.fn();
+const mockChatDelete = jest.fn();
 
 jest.mock('@slack/web-api', () => ({
   WebClient: jest.fn().mockImplementation(() => ({
-    chat: { postMessage: mockPostMessage },
-    conversations: { history: mockHistory },
+    chat: { postMessage: mockPostMessage, delete: mockChatDelete },
+    conversations: { history: mockHistory, replies: mockReplies },
     reactions: { add: mockReactionsAdd },
     search: { messages: mockSearchMessages },
   })),
 }));
 
-const { replyToThread, preview, reactToMessage, fetchMessage, searchMyMessages, respondEphemeral } = require('../src/slack');
+const { replyToThread, preview, reactToMessage, deleteMessage, deleteStartingReviewMessages, fetchMessage, searchMyMessages, respondEphemeral } = require('../src/slack');
 
 beforeEach(() => {
   jest.clearAllMocks();
-  mockPostMessage.mockResolvedValue({});
+  mockPostMessage.mockResolvedValue({ ts: '1778214715.999999' });
   mockReactionsAdd.mockResolvedValue({});
+  mockChatDelete.mockResolvedValue({});
+  mockReplies.mockResolvedValue({ messages: [] });
   process.env.SLACK_PREVIEW_CHANNEL = 'C_PREVIEW';
   delete process.env.DRY_RUN;
   delete process.env.SLACK_WORKSPACE;
@@ -87,6 +91,7 @@ describe('replyToThread — preview link', () => {
       text: 'hello',
     });
   });
+
 });
 
 describe('preview — owner tagging', () => {
@@ -169,6 +174,110 @@ describe('reactToMessage', () => {
     await expect(
       reactToMessage('C0APHQYK456', '1778214715.118289', 'white_check_mark')
     ).resolves.toEqual({ ok: false, error: 'network blip' });
+  });
+});
+
+describe('deleteMessage', () => {
+  test('deletes the message for real when DRY_RUN is not true', async () => {
+    const result = await deleteMessage('C0APHQYK456', '1778214715.118289');
+
+    expect(mockChatDelete).toHaveBeenCalledWith({
+      channel: 'C0APHQYK456',
+      ts: '1778214715.118289',
+    });
+    expect(mockPostMessage).not.toHaveBeenCalled();
+    expect(result).toEqual({ ok: true });
+  });
+
+  test('previews instead of deleting for real under DRY_RUN', async () => {
+    process.env.DRY_RUN = 'true';
+
+    const result = await deleteMessage('C0APHQYK456', '1778214715.118289');
+
+    expect(mockChatDelete).not.toHaveBeenCalled();
+    expect(mockPostMessage).toHaveBeenCalledTimes(1);
+    const previewText = mockPostMessage.mock.calls[0][0].text;
+    expect(previewText).toContain('C0APHQYK456');
+    expect(previewText).toContain('1778214715.118289');
+    expect(result).toEqual({ ok: true });
+  });
+
+  test('reports the Slack error code on failure instead of throwing', async () => {
+    const err = new Error('An API error occurred: message_not_found');
+    err.data = { error: 'message_not_found' };
+    mockChatDelete.mockRejectedValue(err);
+
+    await expect(
+      deleteMessage('C0APHQYK456', '1778214715.118289')
+    ).resolves.toEqual({ ok: false, error: 'message_not_found' });
+  });
+
+  test('falls back to the raw error message when the failure has no Slack error code', async () => {
+    mockChatDelete.mockRejectedValue(new Error('network blip'));
+
+    await expect(
+      deleteMessage('C0APHQYK456', '1778214715.118289')
+    ).resolves.toEqual({ ok: false, error: 'network blip' });
+  });
+});
+
+describe('deleteStartingReviewMessages', () => {
+  const START_TEXT = 'Starting code review for PR #18647. Will post results here shortly.';
+
+  test('deletes every matching "Starting..." message found in the thread', async () => {
+    mockReplies.mockResolvedValue({
+      messages: [
+        { ts: '1712345678.901234', text: 'review giup em <https://github.com/x/y/pull/18647>' },
+        { ts: '1712345679.000001', text: START_TEXT },
+        { ts: '1712345680.000002', text: 'some unrelated reply' },
+        { ts: '1712345681.000003', text: START_TEXT }, // e.g. a leftover from a prior "Review again" run
+      ],
+    });
+
+    const deleted = await deleteStartingReviewMessages('C05F65TBB9P', '1712345678.901234', '18647');
+
+    expect(mockReplies).toHaveBeenCalledWith({
+      channel: 'C05F65TBB9P',
+      ts: '1712345678.901234',
+      limit: 1000,
+    });
+    expect(mockChatDelete).toHaveBeenCalledTimes(2);
+    expect(mockChatDelete).toHaveBeenCalledWith({ channel: 'C05F65TBB9P', ts: '1712345679.000001' });
+    expect(mockChatDelete).toHaveBeenCalledWith({ channel: 'C05F65TBB9P', ts: '1712345681.000003' });
+    expect(deleted).toBe(2);
+  });
+
+  test('only matches the given PR number — another PR\'s starting message in the same thread is untouched', async () => {
+    mockReplies.mockResolvedValue({
+      messages: [
+        { ts: '1712345679.000001', text: START_TEXT },
+        { ts: '1712345679.000002', text: 'Starting code review for PR #99999. Will post results here shortly.' },
+      ],
+    });
+
+    const deleted = await deleteStartingReviewMessages('C05F65TBB9P', '1712345678.901234', '18647');
+
+    expect(mockChatDelete).toHaveBeenCalledTimes(1);
+    expect(mockChatDelete).toHaveBeenCalledWith({ channel: 'C05F65TBB9P', ts: '1712345679.000001' });
+    expect(deleted).toBe(1);
+  });
+
+  test('does nothing when no starting message is found', async () => {
+    mockReplies.mockResolvedValue({ messages: [{ ts: '1.1', text: 'unrelated' }] });
+
+    const deleted = await deleteStartingReviewMessages('C05F65TBB9P', '1712345678.901234', '18647');
+
+    expect(mockChatDelete).not.toHaveBeenCalled();
+    expect(deleted).toBe(0);
+  });
+
+  test('logs but does not throw when fetching the thread replies fails', async () => {
+    mockReplies.mockRejectedValue(new Error('channel_not_found'));
+
+    await expect(
+      deleteStartingReviewMessages('C05F65TBB9P', '1712345678.901234', '18647')
+    ).resolves.toBe(0);
+    expect(mockChatDelete).not.toHaveBeenCalled();
   });
 });
 

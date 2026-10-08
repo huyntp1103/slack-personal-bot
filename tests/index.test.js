@@ -14,6 +14,7 @@ jest.mock('../src/slack', () => ({
   buildThreadLink: jest.fn(),
   respondEphemeral: jest.fn(),
   reactToMessage: jest.fn(),
+  deleteStartingReviewMessages: jest.fn(),
 }));
 jest.mock('../src/github', () => ({
   fetchPrData: jest.fn(),
@@ -28,7 +29,7 @@ jest.mock('../src/review', () => ({
 }));
 
 const { transitionIssue, addComment, getIssue, getIssueSummary } = require('../src/jira');
-const { fetchMessage, searchMyMessages, preview, replyToThread, buildThreadLink, respondEphemeral, reactToMessage } = require('../src/slack');
+const { fetchMessage, searchMyMessages, preview, replyToThread, buildThreadLink, respondEphemeral, reactToMessage, deleteStartingReviewMessages } = require('../src/slack');
 const { fetchPrData, fetchPrTitle, fetchPrCommits, approvePr } = require('../src/github');
 const { runPrReview, reviewSkipReason, cancelReview } = require('../src/review');
 
@@ -81,6 +82,7 @@ beforeEach(() => {
   getIssueSummary.mockResolvedValue(null);
   respondEphemeral.mockResolvedValue(true);
   reactToMessage.mockResolvedValue({ ok: true });
+  deleteStartingReviewMessages.mockResolvedValue(0);
 });
 
 // ─── url_verification ─────────────────────────────────────────────────────────
@@ -1025,6 +1027,17 @@ describe('handleReviewRequestReaction', () => {
     );
   });
 
+  test('sweeps and deletes "Starting code review" messages before posting the completion reply', async () => {
+    await request(app).post('/slack/events').send(eyesPayload());
+
+    expect(deleteStartingReviewMessages).toHaveBeenCalledWith(
+      'C05F65TBB9P', '1712345678.901234', '18647'
+    );
+    expect(deleteStartingReviewMessages.mock.invocationCallOrder[0]).toBeLessThan(
+      replyToThread.mock.invocationCallOrder[1]
+    );
+  });
+
   test('does not attach the "Review again" button once the PR is approved', async () => {
     runPrReview.mockResolvedValue({
       ok: true,
@@ -1189,6 +1202,8 @@ describe('handleReviewRequestReaction', () => {
     const previewText = preview.mock.calls.map(c => c[0]).join('\n');
     expect(previewText).toContain('Code review failed');
     expect(previewText).toContain('claude exited 1: boom');
+    // A failure never reaches the "starting" message cleanup — it stays as-is.
+    expect(deleteStartingReviewMessages).not.toHaveBeenCalled();
   });
 
   test('reviews every PR linked in the message, deduped', async () => {
@@ -1430,6 +1445,104 @@ describe('handleReviewRequestReaction', () => {
       expect(approvePr).toHaveBeenCalledTimes(1);
       delete process.env.DRY_RUN;
     });
+  });
+});
+
+// ─── handleDeleteStartingReviewsReaction (🗑️ → manual "Starting review" cleanup) ──
+
+function wastebasketPayload(overrides = {}) {
+  return {
+    type: 'event_callback',
+    event: {
+      type: 'reaction_added',
+      user: 'U093ZDNQJF3', // me
+      reaction: 'wastebasket',
+      item_user: 'UTEAMMATE',
+      item: {
+        type: 'message',
+        channel: 'C05F65TBB9P', // SLACK_REVIEW_CHANNEL
+        ts: '1712345678.901234',
+      },
+      ...overrides,
+    },
+  };
+}
+
+describe('handleDeleteStartingReviewsReaction', () => {
+  beforeEach(() => {
+    buildThreadLink.mockReturnValue(REVIEW_THREAD_LINK);
+    fetchMessage.mockResolvedValue({ ts: '1712345678.901234', text: 'whatever is in this thread' });
+    deleteStartingReviewMessages.mockResolvedValue(2);
+  });
+
+  test('sweeps the thread with no PR number and previews the count', async () => {
+    await request(app).post('/slack/events').send(wastebasketPayload());
+
+    expect(deleteStartingReviewMessages).toHaveBeenCalledWith('C05F65TBB9P', '1712345678.901234');
+    expect(preview).toHaveBeenCalledWith(
+      `🗑️ *Deleted 2 "Starting review" messages*\n<${REVIEW_THREAD_LINK}|Go to thread>`,
+      { tag: false }
+    );
+  });
+
+  test('singularizes the preview text when exactly one message was deleted', async () => {
+    deleteStartingReviewMessages.mockResolvedValue(1);
+    await request(app).post('/slack/events').send(wastebasketPayload());
+
+    expect(preview).toHaveBeenCalledWith(
+      `🗑️ *Deleted 1 "Starting review" message*\n<${REVIEW_THREAD_LINK}|Go to thread>`,
+      { tag: false }
+    );
+  });
+
+  test('previews zero deletions too — never silently swallows the reaction', async () => {
+    deleteStartingReviewMessages.mockResolvedValue(0);
+    await request(app).post('/slack/events').send(wastebasketPayload());
+
+    expect(preview.mock.calls[0][0]).toContain('Deleted 0 "Starting review" messages');
+  });
+
+  test('omits the thread line when SLACK_WORKSPACE is unset', async () => {
+    buildThreadLink.mockReturnValue(null);
+    await request(app).post('/slack/events').send(wastebasketPayload());
+
+    expect(preview.mock.calls[0][0]).not.toContain('Go to thread');
+  });
+
+  test('ignores 🗑️ from other users', async () => {
+    await request(app).post('/slack/events').send(wastebasketPayload({ user: 'UOTHER' }));
+    expect(deleteStartingReviewMessages).not.toHaveBeenCalled();
+  });
+
+  test('ignores 🗑️ outside SLACK_REVIEW_CHANNEL', async () => {
+    await request(app).post('/slack/events').send(
+      wastebasketPayload({ item: { type: 'message', channel: 'COTHER', ts: '1.2' } })
+    );
+    expect(deleteStartingReviewMessages).not.toHaveBeenCalled();
+  });
+
+  test('skips when 🗑️ is on a thread reply (item ts !== fetched root ts)', async () => {
+    fetchMessage.mockResolvedValue({ ts: '1712345999.000000', text: 'a reply, not the root' });
+    await request(app).post('/slack/events').send(wastebasketPayload());
+
+    expect(deleteStartingReviewMessages).not.toHaveBeenCalled();
+    expect(preview).not.toHaveBeenCalled();
+  });
+
+  test('does nothing when the reacted message cannot be fetched', async () => {
+    fetchMessage.mockResolvedValue(null);
+    await request(app).post('/slack/events').send(wastebasketPayload());
+
+    expect(deleteStartingReviewMessages).not.toHaveBeenCalled();
+    expect(preview).not.toHaveBeenCalled();
+  });
+
+  test('never touches Jira, GitHub, or the team thread', async () => {
+    await request(app).post('/slack/events').send(wastebasketPayload());
+
+    expect(transitionIssue).not.toHaveBeenCalled();
+    expect(approvePr).not.toHaveBeenCalled();
+    expect(replyToThread).not.toHaveBeenCalled();
   });
 });
 
@@ -1818,6 +1931,8 @@ describe('POST /slack/interactive — Cancel review button', () => {
 
     // No "review is complete" / approval message — the cancel click already said it.
     expect(replyToThread).not.toHaveBeenCalled();
+    // The "starting" message is left in place on cancellation, not deleted.
+    expect(deleteStartingReviewMessages).not.toHaveBeenCalled();
     expect(approvePr).not.toHaveBeenCalled();
 
     // reviewsInFlight must be released once the cancelled run settles (the

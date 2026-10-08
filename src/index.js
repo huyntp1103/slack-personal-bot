@@ -5,7 +5,7 @@ require('dotenv').config();
 const crypto = require('crypto');
 const express = require('express');
 const { transitionIssue, addComment, getIssue, getIssueSummary } = require('./jira');
-const { replyToThread, fetchMessage, searchMyMessages, preview, buildThreadLink, respondEphemeral, reactToMessage } = require('./slack');
+const { replyToThread, fetchMessage, searchMyMessages, preview, buildThreadLink, respondEphemeral, reactToMessage, deleteStartingReviewMessages } = require('./slack');
 const { extractJiraKey, extractAllJiraKeys, extractSlackThread } = require('./utils');
 const { fetchPrTitle, fetchPrData, fetchPrCommits, approvePr } = require('./github');
 const { runPrReview, reviewSkipReason, cancelReview } = require('./review');
@@ -13,6 +13,7 @@ const { runPrReview, reviewSkipReason, cancelReview } = require('./review');
 const ALLOWED_BASE_BRANCHES = ['develop', 'releasing_staging', 'main', 'master'];
 const NOTIFY_BASE_BRANCHES = ['develop', 'releasing_staging'];
 const REVIEW_REACTION = 'eyes';
+const DELETE_STARTING_REVIEWS_REACTION = 'wastebasket';
 
 const REVIEW_AGAIN_ACTION = 'review_pr_again';
 const REVIEW_CANCEL_ACTION = 'review_pr_cancel';
@@ -81,6 +82,9 @@ app.post('/slack/events', async (req, res) => {
   } else if (event.type === 'reaction_added' && event.reaction === REVIEW_REACTION) {
     // 👀 on any message → run Claude Code's review-pr skill on the linked PR(s)
     await handleReviewRequestReaction(event);
+  } else if (event.type === 'reaction_added' && event.reaction === DELETE_STARTING_REVIEWS_REACTION) {
+    // 🗑️ on any message → sweep its thread and delete stray "Starting review" messages
+    await handleDeleteStartingReviewsReaction(event);
   }
 });
 
@@ -475,6 +479,46 @@ async function handleReviewRequestReaction(event) {
 }
 
 /**
+ * 🗑️ on a message in #backend-review-code → sweeps that message's thread and
+ * deletes every "Starting code review for PR #<n>..." message still sitting in
+ * it, for any PR. A manual escape hatch: `runReviewForPr`'s own cleanup only
+ * fires once a run resolves, so a run that crashes outright (`claude` missing,
+ * an untrusted workspace, etc.) never gets there and leaves the message stuck
+ * — react 🗑️ on the thread to clear it out by hand.
+ */
+async function handleDeleteStartingReviewsReaction(event) {
+  if (event.user !== process.env.MY_SLACK_USER_ID) return;
+  if (event.item.type !== 'message') return;
+  if (event.item.channel !== process.env.SLACK_REVIEW_CHANNEL) return;
+
+  const channel = event.item.channel;
+  const threadTs = event.item.ts;
+
+  const message = await fetchMessage(channel, threadTs);
+  if (!message) {
+    console.warn('[Slack] 🗑️ — could not fetch reacted message');
+    return;
+  }
+  // Same top-level-only limitation as the 👀 flow: conversations.history returns
+  // the nearest top-level message, so a ts mismatch means this was a thread reply.
+  if (message.ts !== threadTs) {
+    console.log(`[Slack] 🗑️ on thread reply — skipping (reacted ts=${threadTs}, root ts=${message.ts})`);
+    return;
+  }
+
+  const threadLink = buildThreadLink(channel, threadTs);
+  const threadLine = threadLink ? `\n<${threadLink}|Go to thread>` : '';
+
+  const deleted = await deleteStartingReviewMessages(channel, threadTs);
+
+  console.log(`[Slack] 🗑️ — deleted ${deleted} "Starting review" message(s) in ${channel}/${threadTs}`);
+  await preview(
+    `🗑️ *Deleted ${deleted} "Starting review" message${deleted === 1 ? '' : 's'}*${threadLine}`,
+    { tag: false }
+  );
+}
+
+/**
  * The findings recap appended to the completion message: the run's own
  * Slack-formatted digest when it produced one, otherwise a bare per-severity
  * count. Returns '' when the run reported neither — we never invent zeros.
@@ -760,6 +804,13 @@ async function runReviewForPr(prUrl, channel, threadTs) {
     } else {
       doneText = `The review is complete — no findings to post.${formatVerdictLine(result.verdict)}`;
     }
+
+    // The "Starting code review..." message(s) have served their purpose — a
+    // thread can carry more than one for this PR (repeated "Review again" runs,
+    // or ones left behind before this cleanup existed), so sweep and delete all
+    // of them rather than just this run's own. Best-effort: doesn't block the
+    // completion reply below.
+    await deleteStartingReviewMessages(channel, threadTs, prNumber);
 
     // Open findings → offer a one-click re-review for after the fixes are pushed.
     // An approved PR needs no second pass, and a run that posted nothing has no

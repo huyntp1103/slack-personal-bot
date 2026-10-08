@@ -165,6 +165,73 @@ async function reactToMessage(channel, ts, emoji) {
 }
 
 /**
+ * Deletes a message the bot posted — used to clean up the "Starting code
+ * review..." status message once the review completes. Bot must have
+ * chat:write scope; Slack only allows deleting messages the bot itself sent.
+ * Respects DRY_RUN the same way `replyToThread`/`reactToMessage` do: previewed
+ * instead of deleted for real.
+ *
+ * @param {string} channel
+ * @param {string} ts - message timestamp in dot format
+ * @returns {Promise<{ok: boolean, error?: string}>}
+ */
+async function deleteMessage(channel, ts) {
+  if (process.env.DRY_RUN === 'true') {
+    await preview(`👉 *Please delete this message*\nChannel: \`${channel}\` Thread: \`${ts}\``);
+    return { ok: true };
+  }
+
+  try {
+    await slack.chat.delete({ channel, ts });
+    console.log(`[Slack] Deleted message ${ts} in ${channel}`);
+    return { ok: true };
+  } catch (err) {
+    console.log(`[Slack] deleteMessage(${channel}, ${ts}) failed:`, err.message);
+    return { ok: false, error: err.data?.error || err.message };
+  }
+}
+
+/**
+ * Sweeps a thread and deletes every "Starting code review for PR #<n>..."
+ * message it finds, not just one — a thread can carry more than one if the PR
+ * was reviewed multiple times (e.g. via the "Review again" button), a run
+ * crashed before it ever got to clean up after itself, or messages predate
+ * this cleanup existing at all. Matches on the exact bot-generated text.
+ * Best-effort: a failed fetch or an individual delete failure is logged, not
+ * thrown.
+ *
+ * @param {string} channel
+ * @param {string} threadTs
+ * @param {string} [prNumber] - scope deletion to just this PR's starting
+ *   message (another PR's starting message in the same thread — a message can
+ *   link several — is then left alone). Omit to match any PR number, e.g. for
+ *   a manual whole-thread cleanup.
+ * @returns {Promise<number>} how many messages were actually deleted
+ */
+async function deleteStartingReviewMessages(channel, threadTs, prNumber) {
+  const pattern = prNumber
+    ? new RegExp(`^Starting code review for PR #${prNumber}\\. Will post results here shortly\\.$`)
+    : /^Starting code review for PR #\d+\. Will post results here shortly\.$/;
+
+  let messages;
+  try {
+    const res = await slack.conversations.replies({ channel, ts: threadTs, limit: 1000 });
+    messages = res.messages || [];
+  } catch (err) {
+    console.log(`[Slack] deleteStartingReviewMessages(${channel}, ${threadTs}) failed to fetch replies:`, err.message);
+    return 0;
+  }
+
+  const targets = messages.filter(m => pattern.test(m.text || ''));
+  let deleted = 0;
+  for (const m of targets) {
+    const result = await deleteMessage(channel, m.ts);
+    if (result.ok) deleted++;
+  }
+  return deleted;
+}
+
+/**
  * Posts an ephemeral reply to a Slack interaction's `response_url` — visible only
  * to the person who clicked, and never added to the thread. Used to tell a
  * teammate why their "Review again" click didn't start a run.
@@ -197,6 +264,8 @@ module.exports = {
   fetchMessage,
   preview,
   reactToMessage,
+  deleteMessage,
+  deleteStartingReviewMessages,
   searchMyMessages,
   buildThreadLink,
   respondEphemeral,
