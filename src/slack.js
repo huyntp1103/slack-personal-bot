@@ -259,6 +259,37 @@ async function respondEphemeral(responseUrl, text) {
   }
 }
 
+/**
+ * Replaces the message a Block Kit button lives on, via the interaction's
+ * `response_url` — used to swap a completion reply's buttons for a final status
+ * line once someone has acted on it, so the buttons can't be pressed twice.
+ * Without `blocks` the old ones are dropped (text only); pass `blocks` to keep
+ * rich formatting, since plain `text` collapses line breaks into one paragraph.
+ *
+ * @param {string} responseUrl - payload.response_url from the interaction
+ * @param {string} text - the full replacement message (also the notification fallback)
+ * @param {{blocks?: object[]}} [opts]
+ * @returns {Promise<boolean>} true when Slack accepted it (response_urls expire after 30 min)
+ */
+async function replaceOriginal(responseUrl, text, { blocks } = {}) {
+  if (!responseUrl) return false;
+  try {
+    const res = await fetch(responseUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ replace_original: true, text, ...(blocks ? { blocks } : {}) }),
+    });
+    if (!res.ok) {
+      console.log(`[Slack] replaceOriginal failed: ${res.status}`);
+      return false;
+    }
+    return true;
+  } catch (err) {
+    console.log('[Slack] replaceOriginal error:', err.message);
+    return false;
+  }
+}
+
 module.exports = {
   replyToThread,
   fetchMessage,
@@ -269,4 +300,5 @@ module.exports = {
   searchMyMessages,
   buildThreadLink,
   respondEphemeral,
+  replaceOriginal,
 };

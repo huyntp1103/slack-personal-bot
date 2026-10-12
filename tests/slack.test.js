@@ -16,7 +16,7 @@ jest.mock('@slack/web-api', () => ({
   })),
 }));
 
-const { replyToThread, preview, reactToMessage, deleteMessage, deleteStartingReviewMessages, fetchMessage, searchMyMessages, respondEphemeral } = require('../src/slack');
+const { replyToThread, preview, reactToMessage, deleteMessage, deleteStartingReviewMessages, fetchMessage, searchMyMessages, respondEphemeral, replaceOriginal } = require('../src/slack');
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -465,5 +465,51 @@ describe('respondEphemeral', () => {
     fetchMock.mockRejectedValue(new Error('network down'));
     const result = await respondEphemeral('https://hooks.slack.com/actions/x', 'hello');
     expect(result).toBe(false);
+  });
+});
+
+describe('replaceOriginal', () => {
+  let fetchMock;
+
+  beforeEach(() => {
+    fetchMock = jest.fn().mockResolvedValue({ ok: true });
+    global.fetch = fetchMock;
+  });
+
+  afterEach(() => {
+    delete global.fetch;
+  });
+
+  test('posts a replace_original body with text only (no blocks) and returns true', async () => {
+    const result = await replaceOriginal('https://hooks.slack.com/actions/x', 'done');
+
+    expect(fetchMock).toHaveBeenCalledWith('https://hooks.slack.com/actions/x', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ replace_original: true, text: 'done' }),
+    });
+    expect(result).toBe(true);
+  });
+
+  test('includes blocks in the body when given, keeping rich formatting', async () => {
+    const blocks = [{ type: 'section', text: { type: 'mrkdwn', text: 'line 1\nline 2' } }];
+    await replaceOriginal('https://hooks.slack.com/actions/x', 'done', { blocks });
+
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({ replace_original: true, text: 'done', blocks });
+  });
+
+  test('returns false without throwing when responseUrl is falsy', async () => {
+    expect(await replaceOriginal(undefined, 'done')).toBe(false);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  test('returns false when Slack responds with a non-ok status (expired response_url)', async () => {
+    fetchMock.mockResolvedValue({ ok: false, status: 404 });
+    expect(await replaceOriginal('https://hooks.slack.com/actions/x', 'done')).toBe(false);
+  });
+
+  test('returns false and swallows the error on a network failure', async () => {
+    fetchMock.mockRejectedValue(new Error('network down'));
+    expect(await replaceOriginal('https://hooks.slack.com/actions/x', 'done')).toBe(false);
   });
 });
