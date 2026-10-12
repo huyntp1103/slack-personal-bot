@@ -20,6 +20,8 @@ const {
   extractSummary,
   extractVerdict,
   HEADLESS_POLICY,
+  designDocPolicy,
+  buildSystemPrompt,
 } = require('../src/review');
 
 const PR_URL = 'https://github.com/Everfit-io/everfit-api/pull/18647';
@@ -278,6 +280,12 @@ describe('extractVerdict', () => {
 // ─── HEADLESS_POLICY ──────────────────────────────────────────────────────────
 
 describe('HEADLESS_POLICY', () => {
+  test('limits the review to the named PR and treats other mentioned PRs as read-only context', () => {
+    expect(HEADLESS_POLICY).toContain('Review only the PR named in the command');
+    expect(HEADLESS_POLICY).toContain('are context: you may read them');
+    expect(HEADLESS_POLICY).toContain('never review them and never post anything on them');
+  });
+
   test('selects every severity, not just high/medium', () => {
     expect(HEADLESS_POLICY).toContain('`post all`');
     expect(HEADLESS_POLICY).toContain('🔵 Low');
@@ -301,6 +309,59 @@ describe('HEADLESS_POLICY', () => {
     expect(HEADLESS_POLICY).toContain('P2 — Should fix');
     expect(HEADLESS_POLICY).toContain('Key findings (<total> total)');
     expect(HEADLESS_POLICY).toMatch(/Slack mrkdwn/);
+  });
+});
+
+// ─── solution design lookup ───────────────────────────────────────────────────
+
+describe('designDocPolicy / buildSystemPrompt', () => {
+  const MS_PR_URL = 'https://github.com/Everfit-io/everfit-microservices/pull/4888';
+
+  test('is empty for a repo with no configured design source', () => {
+    expect(designDocPolicy({ repo: 'everfit-api', number: '18647' })).toBe('');
+    expect(buildSystemPrompt({ repo: 'everfit-api', number: '18647' })).toBe(HEADLESS_POLICY);
+  });
+
+  test('points everfit-microservices reviews at mp-foundry/projects', () => {
+    const text = designDocPolicy({ repo: 'everfit-microservices', number: '4888' });
+    expect(text).toContain('Everfit-io/mp-foundry');
+    expect(text).toContain('gh pr view 4888 --json title,body,headRefName');
+    expect(text).toContain("gh api repos/Everfit-io/mp-foundry/contents/projects --jq '.[].name'");
+    expect(text).toContain('mpd-817-texting-concierge-pilot');
+    expect(text).toContain('solution-design');
+    expect(text).toContain('Accept: application/vnd.github.raw');
+  });
+
+  test('tells the run to degrade gracefully and stay read-only', () => {
+    const text = designDocPolicy({ repo: 'everfit-microservices', number: '4888' });
+    expect(text).toContain('Solution design: not found');
+    expect(text).toContain('never stop the review over this');
+    expect(text).toContain('never write to it');
+  });
+
+  test('buildSystemPrompt puts the design lookup before the output-marker policy', () => {
+    const prompt = buildSystemPrompt({ repo: 'everfit-microservices', number: '4888' });
+    expect(prompt.indexOf('Solution design lookup')).toBeGreaterThanOrEqual(0);
+    expect(prompt.indexOf('Solution design lookup')).toBeLessThan(prompt.indexOf(HEADLESS_POLICY));
+    expect(prompt.endsWith(HEADLESS_POLICY)).toBe(true); // markers stay last
+  });
+
+  test('runPrReview passes the design lookup to claude for everfit-microservices', () => {
+    spawn.mockReturnValue(fakeChild());
+    runPrReview(MS_PR_URL);
+
+    const args = spawn.mock.calls[0][1];
+    const systemPrompt = args[args.indexOf('--append-system-prompt') + 1];
+    expect(systemPrompt).toBe(buildSystemPrompt({ repo: 'everfit-microservices', number: '4888' }));
+    expect(systemPrompt).toContain('Everfit-io/mp-foundry');
+  });
+
+  test('runPrReview sends only the headless policy for other repos', () => {
+    spawn.mockReturnValue(fakeChild());
+    runPrReview(PR_URL);
+
+    const args = spawn.mock.calls[0][1];
+    expect(args[args.indexOf('--append-system-prompt') + 1]).toBe(HEADLESS_POLICY);
   });
 });
 

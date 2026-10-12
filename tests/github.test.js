@@ -19,6 +19,8 @@ describe('fetchPrData', () => {
       json: async () => ({
         title: 'feat(video-workout): UP-69726 update API',
         base: { ref: 'develop' },
+        merged: false,
+        head: { sha: 'a1b2c3d4e5f60718293a4b5c6d7e8f9012345678' },
       }),
     });
 
@@ -26,7 +28,29 @@ describe('fetchPrData', () => {
     expect(result).toEqual({
       title: 'feat(video-workout): UP-69726 update API',
       baseBranch: 'develop',
+      merged: false,
+      headSha: 'a1b2c3d4e5f60718293a4b5c6d7e8f9012345678',
     });
+  });
+
+  test('reports merged: true for a merged PR', async () => {
+    global.fetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({ title: 'test', base: { ref: 'develop' }, merged: true, state: 'closed' }),
+    });
+
+    const result = await fetchPrData(PR_URL);
+    expect(result.merged).toBe(true);
+  });
+
+  test('a closed-but-unmerged PR is not reported as merged', async () => {
+    global.fetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({ title: 'test', base: { ref: 'develop' }, merged: false, state: 'closed' }),
+    });
+
+    const result = await fetchPrData(PR_URL);
+    expect(result.merged).toBe(false);
   });
 
   test('calls correct GitHub API URL', async () => {
@@ -64,7 +88,7 @@ describe('fetchPrData', () => {
   test('falls back to null title/baseBranch when the response omits them', async () => {
     global.fetch.mockResolvedValue({ ok: true, json: async () => ({}) });
     const result = await fetchPrData(PR_URL);
-    expect(result).toEqual({ title: null, baseBranch: null });
+    expect(result).toEqual({ title: null, baseBranch: null, merged: false, headSha: null });
   });
 });
 

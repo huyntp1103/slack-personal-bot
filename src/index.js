@@ -5,8 +5,8 @@ require('dotenv').config();
 const crypto = require('crypto');
 const express = require('express');
 const { transitionIssue, addComment, getIssue, getIssueSummary } = require('./jira');
-const { replyToThread, fetchMessage, searchMyMessages, preview, buildThreadLink, respondEphemeral, reactToMessage, deleteStartingReviewMessages } = require('./slack');
-const { extractJiraKey, extractAllJiraKeys, extractSlackThread } = require('./utils');
+const { replyToThread, fetchMessage, searchMyMessages, preview, buildThreadLink, respondEphemeral, replaceOriginal, reactToMessage, deleteMessage, fetchThreadReply, deleteStartingReviewMessages } = require('./slack');
+const { extractJiraKey, extractAllJiraKeys, extractSlackThread, extractPrUrls } = require('./utils');
 const { fetchPrTitle, fetchPrData, fetchPrCommits, approvePr } = require('./github');
 const { runPrReview, reviewSkipReason, cancelReview } = require('./review');
 
@@ -17,6 +17,7 @@ const DELETE_STARTING_REVIEWS_REACTION = 'wastebasket';
 
 const REVIEW_AGAIN_ACTION = 'review_pr_again';
 const REVIEW_CANCEL_ACTION = 'review_pr_cancel';
+const REVIEW_ACK_ACTION = 'review_pr_ack';
 // How many times teammates (anyone but me) may re-run a review from the button,
 // per PR. I'm unlimited — the cap only stops the button being hammered.
 const MAX_TEAMMATE_REVIEWS = 2;
@@ -28,6 +29,39 @@ const reviewsInFlight = new Set();
 // PR URL → number of "Review again" runs started by teammates. In memory only,
 // so a restart clears the budget; the cap is a courtesy guard, not a quota.
 const teammateReviewRuns = new Map();
+
+// PR URLs whose latest completed review left only P3 findings and offered the
+// "noted, not fixing now" button. The click re-checks this so a button on an
+// older reply can't approve a PR whose newer review found something worse (or
+// that is being re-reviewed). In memory only — after a restart the button says
+// to run "Review again", which is the safe direction.
+const acknowledgeablePrs = new Set();
+
+// PR URL → head commit SHA of the last review that completed. "Review again"
+// compares it with the PR's current head and refuses when nothing was pushed
+// since. Set only on a finished run (a failed or cancelled one reviewed
+// nothing), in memory only — after a restart there's no record, which allows
+// the click (the safe direction).
+const reviewedHeadShas = new Map();
+
+/**
+ * Review channels, from SLACK_REVIEW_CHANNEL — one channel ID or several
+ * comma-separated (`C05F65TBB9P,C073WMRV127`). Read on every call so a changed
+ * env value is picked up without a restart-order dependency (and tests can set it).
+ *
+ * @returns {string[]}
+ */
+function reviewChannels() {
+  return (process.env.SLACK_REVIEW_CHANNEL || '')
+    .split(',')
+    .map(id => id.trim())
+    .filter(Boolean);
+}
+
+/** Whether `channel` is one of the configured review channels. */
+function isReviewChannel(channel) {
+  return Boolean(channel) && reviewChannels().includes(channel);
+}
 
 const app = express();
 
@@ -83,7 +117,8 @@ app.post('/slack/events', async (req, res) => {
     // 👀 on any message → run Claude Code's review-pr skill on the linked PR(s)
     await handleReviewRequestReaction(event);
   } else if (event.type === 'reaction_added' && event.reaction === DELETE_STARTING_REVIEWS_REACTION) {
-    // 🗑️ on any message → sweep its thread and delete stray "Starting review" messages
+    // 🗑️ on a root message → sweep its thread and delete stray "Starting review" messages
+    // 🗑️ on one of the bot's thread replies → delete that reply
     await handleDeleteStartingReviewsReaction(event);
   }
 });
@@ -242,24 +277,22 @@ app.post('/git/push', async (req, res) => {
  */
 async function handleReviewMessage(event) {
   if (event.user !== process.env.MY_SLACK_USER_ID) return;
-  if (event.channel !== process.env.SLACK_REVIEW_CHANNEL) return;
+  if (!isReviewChannel(event.channel)) return;
 
   // Root messages only — ignore thread replies
   if (event.thread_ts && event.thread_ts !== event.ts) return;
 
   const text = event.text || '';
 
-  // Must contain a GitHub PR link
-  // Slack wraps URLs in angle brackets: <https://github.com/...> — strip them before matching
-  const cleanText = text.replace(/<([^>]+)>/g, '$1');
-  const prUrlMatch = cleanText.match(/https:\/\/github\.com\/[^|\s]+\/pull\/\d+/);
-  if (!prUrlMatch) return;
+  // Must contain a GitHub PR link (in the text or behind a hyperlink label)
+  const [prUrl] = extractPrUrls(event);
+  if (!prUrl) return;
 
   // Try extracting Jira key from message text first, fallback to PR title
   let jiraKey = extractJiraKey(text);
 
   if (!jiraKey) {
-    const prTitle = await fetchPrTitle(prUrlMatch[0]);
+    const prTitle = await fetchPrTitle(prUrl);
     if (prTitle) {
       jiraKey = extractJiraKey(prTitle);
       console.log(`[GitHub] PR title: "${prTitle}"`);
@@ -282,7 +315,7 @@ async function handleReactionAdded(event) {
   if (event.user !== process.env.MY_SLACK_USER_ID) return;
   if (event.reaction !== 'white_check_mark') return;
   if (event.item.type !== 'message') return;
-  if (event.item.channel !== process.env.SLACK_REVIEW_CHANNEL) return;
+  if (!isReviewChannel(event.item.channel)) return;
 
   // Fetch the original message to extract Jira key and PR URL
   const message = await fetchMessage(event.item.channel, event.item.ts);
@@ -292,14 +325,11 @@ async function handleReactionAdded(event) {
   }
 
   const text = message.text || '';
-  const cleanText = text.replace(/<([^>]+)>/g, '$1');
-  const prUrlMatch = cleanText.match(/https:\/\/github\.com\/[^|\s]+\/pull\/\d+/);
-  if (!prUrlMatch) {
+  const [prUrl] = extractPrUrls(message);
+  if (!prUrl) {
     console.log('[Slack] reaction_added: no PR URL in message');
     return;
   }
-
-  const prUrl = prUrlMatch[0];
   const prData = await fetchPrData(prUrl);
   if (!prData) {
     console.log('[Slack] reaction_added: could not fetch PR data');
@@ -396,7 +426,7 @@ async function processQaReadyTicket(jiraKey, baseBranch) {
 async function handleApproveReaction(event) {
   if (event.user !== process.env.MY_SLACK_USER_ID) return;
   if (event.item.type !== 'message') return;
-  if (event.item.channel !== process.env.SLACK_REVIEW_CHANNEL) return;
+  if (!isReviewChannel(event.item.channel)) return;
 
   console.log(`[Slack] ✅ on teammate message — item_user=${event.item_user}`);
 
@@ -422,8 +452,7 @@ async function handleApproveReaction(event) {
     return;
   }
 
-  const cleanText = (message.text || '').replace(/<([^>]+)>/g, '$1');
-  const prUrls = [...new Set(cleanText.match(/https:\/\/github\.com\/[^|\s]+\/pull\/\d+/g) || [])];
+  const prUrls = extractPrUrls(message);
   if (prUrls.length === 0) return;
 
   console.log(`[Slack] ✅ on teammate message — approving ${prUrls.length} PR(s)`);
@@ -449,7 +478,7 @@ async function handleApproveReaction(event) {
 async function handleReviewRequestReaction(event) {
   if (event.user !== process.env.MY_SLACK_USER_ID) return;
   if (event.item.type !== 'message') return;
-  if (event.item.channel !== process.env.SLACK_REVIEW_CHANNEL) return;
+  if (!isReviewChannel(event.item.channel)) return;
 
   const message = await fetchMessage(event.item.channel, event.item.ts);
   if (!message) {
@@ -464,8 +493,7 @@ async function handleReviewRequestReaction(event) {
     return;
   }
 
-  const cleanText = (message.text || '').replace(/<([^>]+)>/g, '$1');
-  const prUrls = [...new Set(cleanText.match(/https:\/\/github\.com\/[^|\s]+\/pull\/\d+/g) || [])];
+  const prUrls = extractPrUrls(message);
   if (prUrls.length === 0) {
     console.log('[Slack] 👀 — no PR URL in message');
     return;
@@ -473,9 +501,17 @@ async function handleReviewRequestReaction(event) {
 
   console.log(`[Slack] 👀 — reviewing ${prUrls.length} PR(s)`);
 
-  for (const prUrl of prUrls) {
-    await runReviewForPr(prUrl, event.item.channel, event.item.ts);
-  }
+  // Concurrent, not sequential: each PR's run is independent (own in-flight key,
+  // own `claude` process, own thread replies), so a slow first review shouldn't
+  // hold up the rest. allSettled so one PR blowing up can't abort the others.
+  const results = await Promise.allSettled(
+    prUrls.map(prUrl => runReviewForPr(prUrl, event.item.channel, event.item.ts))
+  );
+  results.forEach((result, i) => {
+    if (result.status === 'rejected') {
+      console.error(`[Review] ${prUrls[i]} failed unexpectedly:`, result.reason);
+    }
+  });
 }
 
 /**
@@ -489,7 +525,7 @@ async function handleReviewRequestReaction(event) {
 async function handleDeleteStartingReviewsReaction(event) {
   if (event.user !== process.env.MY_SLACK_USER_ID) return;
   if (event.item.type !== 'message') return;
-  if (event.item.channel !== process.env.SLACK_REVIEW_CHANNEL) return;
+  if (!isReviewChannel(event.item.channel)) return;
 
   const channel = event.item.channel;
   const threadTs = event.item.ts;
@@ -502,7 +538,7 @@ async function handleDeleteStartingReviewsReaction(event) {
   // Same top-level-only limitation as the 👀 flow: conversations.history returns
   // the nearest top-level message, so a ts mismatch means this was a thread reply.
   if (message.ts !== threadTs) {
-    console.log(`[Slack] 🗑️ on thread reply — skipping (reacted ts=${threadTs}, root ts=${message.ts})`);
+    await handleDeleteBotReply(channel, threadTs);
     return;
   }
 
@@ -516,6 +552,36 @@ async function handleDeleteStartingReviewsReaction(event) {
     `🗑️ *Deleted ${deleted} "Starting review" message${deleted === 1 ? '' : 's'}*${threadLine}`,
     { tag: false }
   );
+}
+
+/**
+ * 🗑️ on a thread reply → deletes it when the bot posted it (the "Starting code
+ * review...", completion, approval and cancellation replies). Anything a person
+ * wrote is left alone — the bot's `bot_id` is the discriminator, and Slack
+ * itself only lets the bot delete its own messages. One untagged preview says
+ * what happened; a refused delete is surfaced there too instead of vanishing.
+ */
+async function handleDeleteBotReply(channel, ts) {
+  const reply = await fetchThreadReply(channel, ts);
+  if (!reply) {
+    console.log(`[Slack] 🗑️ — could not fetch thread reply ${ts}`);
+    return;
+  }
+  if (!reply.bot_id) {
+    console.log(`[Slack] 🗑️ on a reply not posted by a bot (${ts}) — skipping`);
+    return;
+  }
+
+  const threadLink = buildThreadLink(channel, reply.thread_ts || ts);
+  const threadLine = threadLink ? `\n<${threadLink}|Go to thread>` : '';
+
+  const result = await deleteMessage(channel, ts);
+  if (!result.ok) {
+    await preview(`⚠️ *Couldn't delete the bot's reply*\n\`${result.error}\`${threadLine}`, { tag: false });
+    return;
+  }
+  console.log(`[Slack] 🗑️ — deleted bot reply ${ts} in ${channel}`);
+  await preview(`🗑️ *Deleted the bot's reply*${threadLine}`, { tag: false });
 }
 
 /**
@@ -585,20 +651,58 @@ function formatApprovedText({ commentUrl, verdict, summary, counts }) {
  * @param {string} text - the Slack-mrkdwn completion message
  * @param {string} prUrl - carried in the button's value; the click handler needs it
  * @param {string} prNumber
+ * @param {{acknowledge?: boolean}} [opts] - `acknowledge` adds the green
+ *   `👍 #<n> noted, not fixing now` button (see `isAcknowledgeable`)
  */
-function reviewAgainBlocks(text, prUrl, prNumber) {
+function reviewAgainBlocks(text, prUrl, prNumber, { acknowledge = false } = {}) {
+  const elements = [{
+    type: 'button',
+    action_id: REVIEW_AGAIN_ACTION,
+    text: { type: 'plain_text', text: `🔍 Review #${prNumber} again`, emoji: true },
+    value: prUrl,
+  }];
+  if (acknowledge) {
+    elements.push({
+      type: 'button',
+      action_id: REVIEW_ACK_ACTION,
+      text: { type: 'plain_text', text: `👍 #${prNumber} noted, not fixing now`, emoji: true },
+      value: prUrl,
+      style: 'primary',
+    });
+  }
   return [
     { type: 'section', text: { type: 'mrkdwn', text } },
-    {
-      type: 'actions',
-      elements: [{
-        type: 'button',
-        action_id: REVIEW_AGAIN_ACTION,
-        text: { type: 'plain_text', text: `🔍 Review #${prNumber} again`, emoji: true },
-        value: prUrl,
-      }],
-    },
+    { type: 'actions', elements },
   ];
+}
+
+/**
+ * Whether a completed review is one the PR owner may wave through with the
+ * "noted, not fixing now" button: findings were posted, but all of them are
+ * 🟢 P3 (Low) — no 🔴 P1 (High) and no 🟡 P2 (Medium) — and the verdict isn't
+ * `REQUEST_CHANGES`. Unknown counts (the run reported none) never qualify: we
+ * don't wave through a review we can't read. A clean `APPROVE` is auto-approved
+ * before this is ever asked, so in practice this covers the `COMMENT` verdict
+ * (the model hedged on P3s) and an `APPROVE` whose GitHub approval failed.
+ *
+ * @param {{commentUrl?: string|null, counts?: {high: number, medium: number, low: number}|null, verdict?: {verdict: string}|null}} result
+ * @returns {boolean}
+ */
+function isAcknowledgeable({ commentUrl, counts, verdict }) {
+  if (!commentUrl || !counts) return false;
+  if (verdict?.verdict === 'REQUEST_CHANGES') return false;
+  return counts.high === 0 && counts.medium === 0 && counts.low > 0;
+}
+
+/**
+ * The PR number in a button's label (`action.text.text`) when it disagrees with
+ * the PR in the button's `value` URL; null when they agree or the label carries
+ * no number to compare. Label and value are built from the same PR, so a
+ * mismatch means a stale or tampered button.
+ */
+function mismatchedLabelNumber(action, prNumber) {
+  const labelNumber = action.text?.text?.match(/#(\d+)/)?.[1];
+  return labelNumber && labelNumber !== prNumber ? labelNumber : null;
 }
 
 /**
@@ -622,10 +726,41 @@ async function handleReviewAgainClick(payload, action) {
     return;
   }
 
-  // Checked before the budget so a double-click doesn't burn a teammate's slot.
-  if (reviewsInFlight.has(prUrl)) {
-    await respondEphemeral(payload.response_url, `PR #${prNumber} is being reviewed right now — results will land in this thread.`);
+  // Don't review a PR other than the one the button's label says it is. Slack
+  // echoes the label back as `action.text.text`; no number → nothing to compare.
+  const labelNumber = mismatchedLabelNumber(action, prNumber);
+  if (labelNumber) {
+    console.warn(`[Review again] button label says #${labelNumber} but value is PR #${prNumber} — ignoring`);
+    await respondEphemeral(
+      payload.response_url,
+      `This button is for PR #${labelNumber} but points at PR #${prNumber}, so I didn't start a review. React with 👀 on the message to review it.`
+    );
     return;
+  }
+
+  // Checked before the budget so a double-click doesn't burn a teammate's slot.
+  const refuseIfInFlight = async () => {
+    if (!reviewsInFlight.has(prUrl)) return false;
+    await respondEphemeral(payload.response_url, `PR #${prNumber} is being reviewed right now — results will land in this thread.`);
+    return true;
+  };
+  if (await refuseIfInFlight()) return;
+
+  // Nothing pushed since the last review → a re-run would only repeat it. Fail
+  // open: no record of a previous run, or GitHub unreachable, lets it through.
+  const reviewedSha = reviewedHeadShas.get(prUrl);
+  if (reviewedSha) {
+    const current = await fetchPrData(prUrl);
+    if (current?.headSha && current.headSha === reviewedSha) {
+      console.log(`[Review again] PR #${prNumber} head ${current.headSha} already reviewed — click by ${userId} ignored`);
+      await respondEphemeral(
+        payload.response_url,
+        `PR #${prNumber} has no new commits since the last review (latest commit \`${current.headSha.slice(0, 7)}\`), so I didn't start another one. Push your fixes, then click again.`
+      );
+      return;
+    }
+    // The lookup above is an await — another click may have started a run meanwhile.
+    if (await refuseIfInFlight()) return;
   }
 
   if (!isOwner) {
@@ -645,6 +780,111 @@ async function handleReviewAgainClick(payload, action) {
   }
 
   await runReviewForPr(prUrl, channel, threadTs);
+}
+
+/**
+ * A `👍 #<n> noted, not fixing now` click: the PR owner has read the P3-only
+ * review and is choosing not to fix those findings. Approves the PR on GitHub,
+ * ✅-reacts the message that carried the PR link, and swaps the completion
+ * reply's buttons for a final status line.
+ *
+ * Allowed for whoever posted the PR link (the thread root's author — the PR's
+ * owner as far as Slack can tell) and for me. Guards, in order: button label vs
+ * PR, who clicked, a re-review already running, and the review result still
+ * being the P3-only one the button was offered for. Every refusal is ephemeral.
+ * Like the other approve flows this ignores DRY_RUN.
+ */
+async function handleReviewAckClick(payload, action) {
+  const prUrl = action.value;
+  const prNumber = prUrl?.match(/\/pull\/(\d+)/)?.[1];
+  const userId = payload.user?.id;
+  const channel = payload.channel?.id;
+  const threadTs = payload.message?.thread_ts || payload.message?.ts;
+  const me = process.env.MY_SLACK_USER_ID;
+
+  if (!prUrl || !channel || !threadTs) {
+    console.warn('[Review ack] incomplete interaction payload — ignoring');
+    return;
+  }
+
+  const labelNumber = mismatchedLabelNumber(action, prNumber);
+  if (labelNumber) {
+    console.warn(`[Review ack] button label says #${labelNumber} but value is PR #${prNumber} — ignoring`);
+    await respondEphemeral(
+      payload.response_url,
+      `This button is for PR #${labelNumber} but points at PR #${prNumber}, so I didn't approve anything. Run "Review again" if you still want to act on it.`
+    );
+    return;
+  }
+
+  if (userId !== me) {
+    const root = await fetchMessage(channel, threadTs);
+    if (!root?.user || root.user !== userId) {
+      console.log(`[Review ack] PR #${prNumber} click by ${userId} — not the PR poster (${root?.user ?? 'unknown'}), ignored`);
+      await respondEphemeral(
+        payload.response_url,
+        root?.user
+          ? `Only <@${root.user}> (who posted this PR) or <@${me}> can mark these findings as noted.`
+          : `Only <@${me}> can mark these findings as noted.`
+      );
+      return;
+    }
+  }
+
+  if (reviewsInFlight.has(prUrl)) {
+    await respondEphemeral(payload.response_url, `PR #${prNumber} is being reviewed right now — wait for the new result.`);
+    return;
+  }
+
+  if (!acknowledgeablePrs.has(prUrl)) {
+    await respondEphemeral(
+      payload.response_url,
+      `This review result is out of date for PR #${prNumber}. Click "Review again" to get a fresh one.`
+    );
+    return;
+  }
+
+  const threadLink = buildThreadLink(channel, threadTs);
+  const threadLine = threadLink ? `\n<${threadLink}|Go to thread>` : '';
+
+  const approved = await approvePr(
+    prUrl,
+    '👍 Acknowledged by the PR owner — only low-severity (P3) findings remain and they are not being fixed now. Approved after an automated code review.'
+  );
+  if (!approved) {
+    await preview(`⚠️ *PR approve failed after "noted, not fixing now"* — PR <${prUrl}|#${prNumber}>${threadLine}`, { tag: false });
+    await respondEphemeral(payload.response_url, `Couldn't approve PR #${prNumber} on GitHub — try again, or approve it manually.`);
+    return;
+  }
+  acknowledgeablePrs.delete(prUrl);
+  console.log(`[Review ack] PR #${prNumber} approved after P3-only acknowledgement by ${userId}`);
+
+  const reacted = await reactToMessage(channel, threadTs, 'white_check_mark');
+  if (!reacted.ok) {
+    await preview(
+      `⚠️ *PR approved, but the :white_check_mark: reaction failed* — PR <${prUrl}|#${prNumber}>\n\`${reacted.error}\`${threadLine}`,
+      { tag: false }
+    );
+  }
+
+  // The original reply minus its buttons, plus who decided what. Rebuilt from the
+  // message's section block: Slack's `message.text` in an interaction payload is a
+  // flattened fallback with the line breaks collapsed, which is how the digest
+  // used to come back as one run-on paragraph. The status line gets its own block.
+  // If Slack won't take the replacement (response_url lives 30 min), say it in the
+  // thread instead.
+  const status = `👍 <@${userId}> noted the P3 findings and is not fixing them now — ✅ *Approved on GitHub*.`;
+  const original = payload.message?.blocks?.find(b => b.type === 'section' && b.text?.text)?.text.text
+    || payload.message?.text;
+  const section = text => ({ type: 'section', text: { type: 'mrkdwn', text } });
+  const replaced = await replaceOriginal(
+    payload.response_url,
+    original ? `${original}\n${status}` : status,
+    { blocks: original ? [section(original), section(status)] : [section(status)] }
+  );
+  if (!replaced) {
+    await replyToThread(channel, threadTs, `PR #${prNumber}: ${status}`, { notify: false });
+  }
 }
 
 /**
@@ -740,9 +980,23 @@ async function runReviewForPr(prUrl, channel, threadTs) {
     return;
   }
 
+  // Marked in flight *before* the merged-state lookup below: that's an await, and
+  // a second 👀/click landing during it must hit the duplicate guard above.
   reviewsInFlight.add(prUrl);
 
   try {
+    // A merged PR has nothing left to review. Fail open: when GitHub can't be
+    // reached `fetchPrData` returns null and the review proceeds as before.
+    const prData = await fetchPrData(prUrl);
+    if (prData?.merged) {
+      console.log(`[Review] skipping PR #${prNumber}: already merged`);
+      await preview(`⏭️ *Code review skipped* — PR <${prUrl}|#${prNumber}>\n\`PR is already merged\`${threadLine}`);
+      return;
+    }
+
+    // A fresh run supersedes whatever the previous result allowed.
+    acknowledgeablePrs.delete(prUrl);
+
     // notify: false on both replies — suppresses the per-reply "✅ Replied in
     // Slack" preview. On success the team thread reply is the only output;
     // only a failure additionally pings the preview channel (see below).
@@ -765,6 +1019,9 @@ async function runReviewForPr(prUrl, channel, threadTs) {
       await preview(`⚠️ *Code review failed* — PR <${prUrl}|#${prNumber}>\n\`${result.error}\`${threadLine}`);
       return;
     }
+
+    // Remember which commit this review covered, for the "Review again" guard.
+    if (prData?.headSha) reviewedHeadShas.set(prUrl, prData.headSha);
 
     // A clean run approves the PR on GitHub before the thread is told about it,
     // so the completion message can say it's approved rather than merely ready.
@@ -816,9 +1073,12 @@ async function runReviewForPr(prUrl, channel, threadTs) {
     // An approved PR needs no second pass, and a run that posted nothing has no
     // findings to fix, so neither gets a button.
     const showReviewAgain = !approved && Boolean(result.commentUrl);
+    // P3-only findings can also be waved through by the PR owner (see isAcknowledgeable).
+    const acknowledge = !approved && isAcknowledgeable(result);
+    if (acknowledge) acknowledgeablePrs.add(prUrl);
     await replyToThread(channel, threadTs, doneText, {
       notify: false,
-      ...(showReviewAgain ? { blocks: reviewAgainBlocks(doneText, prUrl, prNumber) } : {}),
+      ...(showReviewAgain ? { blocks: reviewAgainBlocks(doneText, prUrl, prNumber, { acknowledge }) } : {}),
     });
   } finally {
     reviewsInFlight.delete(prUrl);
@@ -857,6 +1117,8 @@ app.post('/slack/interactive', async (req, res) => {
     await handleReviewAgainClick(payload, action);
   } else if (action?.action_id === REVIEW_CANCEL_ACTION) {
     await handleReviewCancelClick(payload, action);
+  } else if (action?.action_id === REVIEW_ACK_ACTION) {
+    await handleReviewAckClick(payload, action);
   }
 });
 
