@@ -20,6 +20,9 @@ const {
   extractSummary,
   extractVerdict,
   HEADLESS_POLICY,
+  designDocPolicy,
+  repoReviewPolicy,
+  buildSystemPrompt,
 } = require('../src/review');
 
 const PR_URL = 'https://github.com/Everfit-io/everfit-api/pull/18647';
@@ -278,6 +281,12 @@ describe('extractVerdict', () => {
 // ─── HEADLESS_POLICY ──────────────────────────────────────────────────────────
 
 describe('HEADLESS_POLICY', () => {
+  test('limits the review to the named PR and treats other mentioned PRs as read-only context', () => {
+    expect(HEADLESS_POLICY).toContain('Review only the PR named in the command');
+    expect(HEADLESS_POLICY).toContain('are context: you may read them');
+    expect(HEADLESS_POLICY).toContain('never review them and never post anything on them');
+  });
+
   test('selects every severity, not just high/medium', () => {
     expect(HEADLESS_POLICY).toContain('`post all`');
     expect(HEADLESS_POLICY).toContain('🔵 Low');
@@ -301,6 +310,101 @@ describe('HEADLESS_POLICY', () => {
     expect(HEADLESS_POLICY).toContain('P2 — Should fix');
     expect(HEADLESS_POLICY).toContain('Key findings (<total> total)');
     expect(HEADLESS_POLICY).toMatch(/Slack mrkdwn/);
+  });
+});
+
+// ─── solution design lookup ───────────────────────────────────────────────────
+
+describe('repoReviewPolicy', () => {
+  const cpa = { repo: 'client-payment-api', number: '812' };
+
+  test('is empty for a repo with no review skill of its own', () => {
+    expect(repoReviewPolicy({ repo: 'everfit-api', number: '1' })).toBe('');
+    expect(repoReviewPolicy({ repo: 'everfit-microservices', number: '1' })).toBe('');
+  });
+
+  test('points client-payment-api at its own skill and rules', () => {
+    const text = repoReviewPolicy(cpa);
+    expect(text).toContain('`.claude/skills/review/SKILL.md`');
+    expect(text).toContain('`.claude/agents/code-reviewer.md`');
+    expect(text).toContain('spec compliance');
+    expect(text).toContain('adversarial');
+  });
+
+  test('keeps the PR plumbing on the review-pr skill and off the local working tree', () => {
+    const text = repoReviewPolicy(cpa);
+    expect(text).toContain("PR #812's diff");
+    expect(text).toContain('Do not review `git diff` of the local checkout');
+    expect(text).toContain('Skip its Step 1 and Step 2 commands');
+    expect(text).toContain('Never check out another branch');
+  });
+
+  test('maps the skill\'s severities and verdicts onto the markers the bot parses', () => {
+    const text = repoReviewPolicy(cpa);
+    expect(text).toContain('CRITICAL and HIGH → 🔴 High (P1), MEDIUM → 🟡 Medium (P2), LOW → 🔵 Low (P3)');
+    expect(text).toContain('NEEDS_DISCUSSION → COMMENT');
+  });
+
+  test('falls back to a standard review when the skill file is absent', () => {
+    expect(repoReviewPolicy(cpa)).toContain('does not exist in this clone');
+  });
+
+  test('buildSystemPrompt places it before the output-marker policy', () => {
+    const prompt = buildSystemPrompt(cpa);
+    expect(prompt.startsWith(repoReviewPolicy(cpa))).toBe(true);
+    expect(prompt.endsWith(HEADLESS_POLICY)).toBe(true);
+    expect(prompt).not.toContain('Solution design lookup');
+  });
+});
+
+describe('designDocPolicy / buildSystemPrompt', () => {
+  const MS_PR_URL = 'https://github.com/Everfit-io/everfit-microservices/pull/4888';
+
+  test('is empty for a repo with no configured design source', () => {
+    expect(designDocPolicy({ repo: 'everfit-api', number: '18647' })).toBe('');
+    expect(buildSystemPrompt({ repo: 'everfit-api', number: '18647' })).toBe(HEADLESS_POLICY);
+  });
+
+  test('points everfit-microservices reviews at mp-foundry/projects', () => {
+    const text = designDocPolicy({ repo: 'everfit-microservices', number: '4888' });
+    expect(text).toContain('Everfit-io/mp-foundry');
+    expect(text).toContain('gh pr view 4888 --json title,body,headRefName');
+    expect(text).toContain("gh api repos/Everfit-io/mp-foundry/contents/projects --jq '.[].name'");
+    expect(text).toContain('mpd-817-texting-concierge-pilot');
+    expect(text).toContain('solution-design');
+    expect(text).toContain('Accept: application/vnd.github.raw');
+  });
+
+  test('tells the run to degrade gracefully and stay read-only', () => {
+    const text = designDocPolicy({ repo: 'everfit-microservices', number: '4888' });
+    expect(text).toContain('Solution design: not found');
+    expect(text).toContain('never stop the review over this');
+    expect(text).toContain('never write to it');
+  });
+
+  test('buildSystemPrompt puts the design lookup before the output-marker policy', () => {
+    const prompt = buildSystemPrompt({ repo: 'everfit-microservices', number: '4888' });
+    expect(prompt.indexOf('Solution design lookup')).toBeGreaterThanOrEqual(0);
+    expect(prompt.indexOf('Solution design lookup')).toBeLessThan(prompt.indexOf(HEADLESS_POLICY));
+    expect(prompt.endsWith(HEADLESS_POLICY)).toBe(true); // markers stay last
+  });
+
+  test('runPrReview passes the design lookup to claude for everfit-microservices', () => {
+    spawn.mockReturnValue(fakeChild());
+    runPrReview(MS_PR_URL);
+
+    const args = spawn.mock.calls[0][1];
+    const systemPrompt = args[args.indexOf('--append-system-prompt') + 1];
+    expect(systemPrompt).toBe(buildSystemPrompt({ repo: 'everfit-microservices', number: '4888' }));
+    expect(systemPrompt).toContain('Everfit-io/mp-foundry');
+  });
+
+  test('runPrReview sends only the headless policy for other repos', () => {
+    spawn.mockReturnValue(fakeChild());
+    runPrReview(PR_URL);
+
+    const args = spawn.mock.calls[0][1];
+    expect(args[args.indexOf('--append-system-prompt') + 1]).toBe(HEADLESS_POLICY);
   });
 });
 
@@ -362,6 +466,31 @@ describe('runPrReview', () => {
     child.emit('close', 0);
 
     await expect(promise).resolves.toMatchObject({ ok: true, counts: null });
+  });
+
+  test('an explicit model option wins over REVIEW_CLAUDE_MODEL', async () => {
+    process.env.REVIEW_CLAUDE_MODEL = 'opus';
+    const child = fakeChild();
+    spawn.mockReturnValue(child);
+
+    const promise = runPrReview(PR_URL, { model: 'claude-haiku-5-5' });
+    const args = spawn.mock.calls[0][1];
+    expect(args.filter(a => a === '--model')).toHaveLength(1);
+    expect(args[args.indexOf('--model') + 1]).toBe('claude-haiku-5-5');
+
+    child.emit('close', 0);
+    await promise;
+  });
+
+  test('passes no --model when neither the option nor REVIEW_CLAUDE_MODEL is set', async () => {
+    const child = fakeChild();
+    spawn.mockReturnValue(child);
+
+    const promise = runPrReview(PR_URL);
+    expect(spawn.mock.calls[0][1]).not.toContain('--model');
+
+    child.emit('close', 0);
+    await promise;
   });
 
   test('honours CLAUDE_BIN, REVIEW_PERMISSION_MODE and REVIEW_CLAUDE_MODEL', async () => {

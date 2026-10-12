@@ -4,7 +4,7 @@
  * Fetches GitHub PR data given its URL.
  *
  * @param {string} prUrl - e.g. https://github.com/Everfit-io/everfit-api/pull/16391
- * @returns {Promise<{title: string, baseBranch: string}|null>}
+ * @returns {Promise<{title: string|null, baseBranch: string|null, merged: boolean, headSha: string|null}|null>}
  */
 async function fetchPrData(prUrl) {
   const match = prUrl.match(/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/);
@@ -30,6 +30,8 @@ async function fetchPrData(prUrl) {
     return {
       title: data.title ?? null,
       baseBranch: data.base?.ref ?? null,
+      merged: Boolean(data.merged),
+      headSha: data.head?.sha ?? null,
     };
   } catch (err) {
     console.log('[GitHub] fetchPrData error:', err.message);

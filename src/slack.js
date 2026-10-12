@@ -79,6 +79,27 @@ async function fetchMessage(channel, ts) {
 }
 
 /**
+ * Fetches one thread reply by its own timestamp. `fetchMessage` can't do this —
+ * `conversations.history` only lists top-level messages, so for a reply it
+ * returns the nearest root instead. `conversations.replies` accepts a reply's
+ * ts; the result is matched on `ts` so a thread listing starting at the root
+ * can't be mistaken for the reply.
+ *
+ * @param {string} channel
+ * @param {string} ts - the reply's own timestamp
+ * @returns {Promise<object|null>} null when not found or the call failed
+ */
+async function fetchThreadReply(channel, ts) {
+  try {
+    const result = await slack.conversations.replies({ channel, ts, limit: 1000 });
+    return (result.messages || []).find(m => m.ts === ts) ?? null;
+  } catch (err) {
+    console.log(`[Slack] fetchThreadReply(${channel}, ${ts}) failed:`, err.message);
+    return null;
+  }
+}
+
+/**
  * Searches all of the user's accessible Slack content (public + private channels,
  * DMs, group DMs) using the user-token search.messages API. Paginates internally.
  *
@@ -211,7 +232,9 @@ async function deleteMessage(channel, ts) {
 async function deleteStartingReviewMessages(channel, threadTs, prNumber) {
   const pattern = prNumber
     ? new RegExp(`^Starting code review for PR #${prNumber}\\. Will post results here shortly\\.$`)
-    : /^Starting code review for PR #\d+\. Will post results here shortly\.$/;
+    // Whole-thread sweep: a cancelled run leaves its "❌ Review of PR #<n>
+    // cancelled by <@user>." notice behind too, so that goes with it.
+    : /^(Starting code review for PR #\d+\. Will post results here shortly\.|(?:❌|:x:) Review of PR #\d+ cancelled by <@[A-Z0-9]+(?:\|[^>]*)?>\.)$/;
 
   let messages;
   try {
@@ -259,9 +282,41 @@ async function respondEphemeral(responseUrl, text) {
   }
 }
 
+/**
+ * Replaces the message a Block Kit button lives on, via the interaction's
+ * `response_url` — used to swap a completion reply's buttons for a final status
+ * line once someone has acted on it, so the buttons can't be pressed twice.
+ * Without `blocks` the old ones are dropped (text only); pass `blocks` to keep
+ * rich formatting, since plain `text` collapses line breaks into one paragraph.
+ *
+ * @param {string} responseUrl - payload.response_url from the interaction
+ * @param {string} text - the full replacement message (also the notification fallback)
+ * @param {{blocks?: object[]}} [opts]
+ * @returns {Promise<boolean>} true when Slack accepted it (response_urls expire after 30 min)
+ */
+async function replaceOriginal(responseUrl, text, { blocks } = {}) {
+  if (!responseUrl) return false;
+  try {
+    const res = await fetch(responseUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ replace_original: true, text, ...(blocks ? { blocks } : {}) }),
+    });
+    if (!res.ok) {
+      console.log(`[Slack] replaceOriginal failed: ${res.status}`);
+      return false;
+    }
+    return true;
+  } catch (err) {
+    console.log('[Slack] replaceOriginal error:', err.message);
+    return false;
+  }
+}
+
 module.exports = {
   replyToThread,
   fetchMessage,
+  fetchThreadReply,
   preview,
   reactToMessage,
   deleteMessage,
@@ -269,4 +324,5 @@ module.exports = {
   searchMyMessages,
   buildThreadLink,
   respondEphemeral,
+  replaceOriginal,
 };
