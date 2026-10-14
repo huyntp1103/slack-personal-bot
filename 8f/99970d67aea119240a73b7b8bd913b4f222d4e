@@ -1,0 +1,61 @@
+CLAUDE.md
+  s_2a01cb6fbe8883::t_5e41faf0e3ed67 24,83
+  s_2a01cb6fbe8883::t_c00343fc883dfa 47,50,114,128,245
+  s_2a01cb6fbe8883::t_6988549e20ab36 100,109,113
+  s_2a01cb6fbe8883::t_b3806c8c264d42 186
+tests/review.test.js
+  s_2a01cb6fbe8883::t_8caf2e9f3b1b59 360-361
+  s_2a01cb6fbe8883::t_b3806c8c264d42 23-24,309-359
+tests/index.test.js
+  s_2a01cb6fbe8883::t_56c8b2cb968864 1455-1586,1862-1919
+  s_2a01cb6fbe8883::t_78a7a958014515 836-847,1407-1438,1440-1452
+  s_d22d17f684293d::t_31a76454b39aba 2385
+  s_2a01cb6fbe8883::t_646b2a0dec474c 1920
+  s_2a01cb6fbe8883::t_0ce7ccfa353064 16,33,85,1336-1406,1439,1453-1454,2132-2384
+tests/slack.test.js
+  s_2a01cb6fbe8883::t_0ce7ccfa353064 19,470-506
+  s_d22d17f684293d::t_d3f0d75b485a16 507-508
+src/review.js
+  s_2a01cb6fbe8883::t_b3806c8c264d42 87-130,319,414-415
+src/github.js
+  s_2a01cb6fbe8883::t_b6c400fd95706c 7,33
+src/slack.js
+  s_2a01cb6fbe8883::t_6fc3de60a2fd75 262-290,301
+src/utils.js
+  s_2a01cb6fbe8883::t_9a47433c36b7d2 48-102
+tests/github.test.js
+  s_2a01cb6fbe8883::t_56c8b2cb968864 22,30,34-53,89
+tests/utils.test.js
+  s_2a01cb6fbe8883::t_78a7a958014515 3,103-184
+  s_2a01cb6fbe8883::t_c3adf1d258181f 185
+src/index.js
+  s_2a01cb6fbe8883::t_b6c400fd95706c 477-487,676-683,897-898,902-909,913
+  s_2a01cb6fbe8883::t_c00343fc883dfa 597-598
+  s_2a01cb6fbe8883::t_9a47433c36b7d2 9,260-262,268,301-302,428,469
+  s_2a01cb6fbe8883::t_6fc3de60a2fd75 8,20,33-39,600-615,618,622-650,672-675,709-801,910-912,987-989,992,1031-1032
+  s_d22d17f684293d::t_d84892e0046e08 802-803
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "8f99970d67aea119240a73b7b8bd913b4f222d4e",
+  "prompts": {},
+  "sessions": {
+    "s_2a01cb6fbe8883": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "7772f74f-6bb8-4844-8750-55b17fb12113",
+        "model": "claude-sonnet-5-5"
+      },
+      "human_author": null
+    },
+    "s_d22d17f684293d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "963fe64f-9d93-46a3-8b37-5b0238dfe036",
+        "model": "claude-sonnet-5"
+      },
+      "human_author": null
+    }
+  }
+}
