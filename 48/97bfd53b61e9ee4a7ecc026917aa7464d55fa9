@@ -1,0 +1,83 @@
+tests/github.test.js
+  s_2a01cb6fbe8883::t_56c8b2cb968864 22,30,34-53,89
+.env.example
+  s_2a01cb6fbe8883::t_5cb74d1e85637c 10-11
+tests/utils.test.js
+  s_2a01cb6fbe8883::t_686f60945b706f 125,134-135,140-163
+  s_2a01cb6fbe8883::t_78a7a958014515 3,103-124,126-133,136-139,164,166-176,196-222
+  s_2a01cb6fbe8883::t_c3adf1d258181f 223
+  s_2a01cb6fbe8883::t_59db594dfad872 178-195
+  s_2a01cb6fbe8883::t_0a00105b111245 165,177
+tests/slack.test.js
+  s_d22d17f684293d::t_d3f0d75b485a16 514-515
+  s_2a01cb6fbe8883::t_aba70463d6ba1a 494-500
+  s_2a01cb6fbe8883::t_0ce7ccfa353064 19,470-493,501-513
+src/index.js
+  s_d22d17f684293d::t_d84892e0046e08 831-832
+  s_2a01cb6fbe8883::t_6fc3de60a2fd75 8,20,33-39,619-634,637,641-669,691-694,728-812,819,828-830,939-941,1016-1018,1021,1060-1061
+  s_2a01cb6fbe8883::t_5cb74d1e85637c 40-58,272,310,421,473,520
+  s_2a01cb6fbe8883::t_b6c400fd95706c 496-506,695-702,926-927,931-938,942
+  s_2a01cb6fbe8883::t_c00343fc883dfa 616-617
+  s_2a01cb6fbe8883::t_81a2730f82776e 813-818,820-827
+  s_2a01cb6fbe8883::t_9a47433c36b7d2 9,279-281,287,320-321,447,488
+src/utils.js
+  s_2a01cb6fbe8883::t_59db594dfad872 53-56
+  s_2a01cb6fbe8883::t_686f60945b706f 58-73,75,77-80,83,85,87-94,103-108,119-120,125
+  s_2a01cb6fbe8883::t_9a47433c36b7d2 48-52,57,74,76,81-82,84,86,95-102,109-118,121-124,126-132
+src/slack.js
+  s_2a01cb6fbe8883::t_6fc3de60a2fd75 262-265,268-269,272-273,275-279,281-292,303
+  s_2a01cb6fbe8883::t_81a2730f82776e 266-267,270-271,274,280
+tests/review.test.js
+  s_2a01cb6fbe8883::t_8caf2e9f3b1b59 366-367
+  s_2a01cb6fbe8883::t_b3806c8c264d42 23-24,315-365
+  s_2a01cb6fbe8883::t_59db594dfad872 283-288
+src/review.js
+  s_2a01cb6fbe8883::t_b3806c8c264d42 88-131,320,415-416
+  s_2a01cb6fbe8883::t_59db594dfad872 62
+CLAUDE.md
+  s_2a01cb6fbe8883::t_5e41faf0e3ed67 24
+  s_2a01cb6fbe8883::t_59db594dfad872 186
+  s_2a01cb6fbe8883::t_c00343fc883dfa 47,50,128,245
+  s_2a01cb6fbe8883::t_686f60945b706f 83
+  s_2a01cb6fbe8883::t_6988549e20ab36 100,109,113
+  s_2a01cb6fbe8883::t_1fa484fda1e5ba 78,151
+  s_2a01cb6fbe8883::t_aba70463d6ba1a 114
+src/github.js
+  s_2a01cb6fbe8883::t_b6c400fd95706c 7,33
+tests/index.test.js
+  s_2a01cb6fbe8883::t_d1331c48d54b67 1465-1485
+  s_2a01cb6fbe8883::t_78a7a958014515 836-847,1407-1438,1440-1445,1486-1492
+  s_2a01cb6fbe8883::t_1fa484fda1e5ba 2406,2642-2749
+  s_2a01cb6fbe8883::t_0ce7ccfa353064 16,33,85,1336-1406,1439,1493-1494,2172-2188,2198-2236,2238-2239,2247-2260,2262-2405,2452-2458,2462-2485
+  s_2a01cb6fbe8883::t_9fd882faebdd94 2261
+  s_2a01cb6fbe8883::t_56c8b2cb968864 1495-1626,1902-1959
+  s_2a01cb6fbe8883::t_59db594dfad872 1446-1464
+  s_d22d17f684293d::t_31a76454b39aba 2486
+  s_2a01cb6fbe8883::t_646b2a0dec474c 1960
+  s_2a01cb6fbe8883::t_aba70463d6ba1a 2189-2197,2237,2240-2246,2408-2451,2459-2461
+  s_2a01cb6fbe8883::t_8dcc8f061588e1 2407
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "4897bfd53b61e9ee4a7ecc026917aa7464d55fa9",
+  "prompts": {},
+  "sessions": {
+    "s_2a01cb6fbe8883": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "7772f74f-6bb8-4844-8750-55b17fb12113",
+        "model": "claude-sonnet-5-5"
+      },
+      "human_author": null
+    },
+    "s_d22d17f684293d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "963fe64f-9d93-46a3-8b37-5b0238dfe036",
+        "model": "claude-sonnet-5"
+      },
+      "human_author": null
+    }
+  }
+}
