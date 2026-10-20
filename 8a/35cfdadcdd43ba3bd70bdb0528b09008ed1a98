@@ -1,0 +1,104 @@
+tests/index.test.js
+  s_2a01cb6fbe8883::t_9fd882faebdd94 2514
+  s_2a01cb6fbe8883::t_22f282556b7fab 18-19,35,1831-1832,1855-1948,2000-2048,2057,2060,2062,2064,2068,2075-2152
+  s_2a01cb6fbe8883::t_aba70463d6ba1a 2442-2450,2490,2493-2499,2661-2704,2712-2714
+  s_2a01cb6fbe8883::t_56c8b2cb968864 1497-1628,2155-2212
+  s_2a01cb6fbe8883::t_d1331c48d54b67 1467-1487
+  s_d22d17f684293d::t_31a76454b39aba 2739
+  s_2a01cb6fbe8883::t_3ebfe887834efb 2049-2056,2058-2059,2061,2063,2065-2067,2069-2074
+  s_2a01cb6fbe8883::t_0ce7ccfa353064 16,87,1338-1408,1441,1495-1496,2425-2441,2451-2489,2491-2492,2500-2513,2515-2658,2705-2711,2715-2738
+  s_2a01cb6fbe8883::t_8dcc8f061588e1 2660
+  s_06cfc6d201950f::t_efe1b5580e1a07 1949-1951
+  s_2a01cb6fbe8883::t_1fa484fda1e5ba 2659,2895-3002
+  s_2a01cb6fbe8883::t_78a7a958014515 838-849,1409-1440,1442-1447,1488-1494
+  s_d22d17f684293d::t_1ae5cff11abd8a 2153-2154
+  s_2a01cb6fbe8883::t_646b2a0dec474c 2213
+  s_2a01cb6fbe8883::t_59db594dfad872 1448-1466
+tests/review.test.js
+  s_2a01cb6fbe8883::t_8caf2e9f3b1b59 366-367
+  s_2a01cb6fbe8883::t_b3806c8c264d42 23-24,315-365
+  s_2a01cb6fbe8883::t_59db594dfad872 283-288
+tests/github.test.js
+  s_2a01cb6fbe8883::t_56c8b2cb968864 22,31,36-55
+  s_2a01cb6fbe8883::t_22f282556b7fab 23,32,91
+src/utils.js
+  s_2a01cb6fbe8883::t_59db594dfad872 53-56
+  s_2a01cb6fbe8883::t_686f60945b706f 58-73,75,77-80,83,85,87-94,103-108,119-120,125
+  s_2a01cb6fbe8883::t_9a47433c36b7d2 48-52,57,74,76,81-82,84,86,95-102,109-118,121-124,126-132
+.env.example
+  s_2a01cb6fbe8883::t_5cb74d1e85637c 10-11
+src/slack.js
+  s_2a01cb6fbe8883::t_35fa07016fd6e6 82-101,317
+  s_2a01cb6fbe8883::t_6fc3de60a2fd75 81,283-286,289-290,293-294,296-300,302-313,325
+  s_2a01cb6fbe8883::t_81a2730f82776e 287-288,291-292,295,301
+tests/utils.test.js
+  s_2a01cb6fbe8883::t_78a7a958014515 3,103-124,126-133,136-139,164,166-176,196-222
+  s_2a01cb6fbe8883::t_686f60945b706f 125,134-135,140-163
+  s_2a01cb6fbe8883::t_0a00105b111245 165,177
+  s_2a01cb6fbe8883::t_c3adf1d258181f 223
+  s_2a01cb6fbe8883::t_59db594dfad872 178-195
+tests/slack.test.js
+  s_d22d17f684293d::t_d3f0d75b485a16 392-394,547-548
+  s_2a01cb6fbe8883::t_0ce7ccfa353064 503-526,534-546
+  s_2a01cb6fbe8883::t_aba70463d6ba1a 527-533
+  s_2a01cb6fbe8883::t_22f282556b7fab 19,362-391
+CLAUDE.md
+  s_2a01cb6fbe8883::t_c00343fc883dfa 47,50,131,248
+  s_2a01cb6fbe8883::t_1fa484fda1e5ba 79,154
+  s_2a01cb6fbe8883::t_59db594dfad872 189
+  s_2a01cb6fbe8883::t_5e41faf0e3ed67 24
+  s_2a01cb6fbe8883::t_77ab0133187a3d 49,51-52,114,117-119
+  s_2a01cb6fbe8883::t_686f60945b706f 84
+  s_2a01cb6fbe8883::t_bf6b1894f03711 120-123
+  s_2a01cb6fbe8883::t_aba70463d6ba1a 115
+  s_2a01cb6fbe8883::t_6988549e20ab36 101,110
+src/review.js
+  s_2a01cb6fbe8883::t_b3806c8c264d42 88-131,320,415-416
+  s_2a01cb6fbe8883::t_59db594dfad872 62
+src/github.js
+  s_2a01cb6fbe8883::t_35fa07016fd6e6 7,34
+  s_2a01cb6fbe8883::t_b6c400fd95706c 33
+src/index.js
+  s_2a01cb6fbe8883::t_b6c400fd95706c 504-514,733-740,983-984,988-995,999
+  s_2a01cb6fbe8883::t_81a2730f82776e 870-875,877-884
+  s_d22d17f684293d::t_7f736192524607 1025
+  s_2a01cb6fbe8883::t_35fa07016fd6e6 8,40-46,120-121,541,557-584,742-743,745-763,1023-1024
+  s_06cfc6d201950f::t_4e503f837ea00c 585-586
+  s_2a01cb6fbe8883::t_5cb74d1e85637c 47-65,280,318,429,481,528
+  s_2a01cb6fbe8883::t_c00343fc883dfa 654-655
+  s_2a01cb6fbe8883::t_9a47433c36b7d2 9,287-289,295,328-329,455,496
+  s_d22d17f684293d::t_d84892e0046e08 888-889
+  s_2a01cb6fbe8883::t_6fc3de60a2fd75 20,33-39,657-672,675,679-707,729-732,785-869,876,885-887,996-998,1076-1078,1081,1120-1121
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "8a35cfdadcdd43ba3bd70bdb0528b09008ed1a98",
+  "prompts": {},
+  "sessions": {
+    "s_06cfc6d201950f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "e143b0f8-c5fd-49ad-9f1d-23fabc6c9b67",
+        "model": "claude-sonnet-5"
+      },
+      "human_author": "Huy Nguyen Nhat <huyntp1103@gmail.com>"
+    },
+    "s_2a01cb6fbe8883": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "7772f74f-6bb8-4844-8750-55b17fb12113",
+        "model": "claude-sonnet-5-5"
+      },
+      "human_author": null
+    },
+    "s_d22d17f684293d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "963fe64f-9d93-46a3-8b37-5b0238dfe036",
+        "model": "claude-sonnet-5"
+      },
+      "human_author": null
+    }
+  }
+}
