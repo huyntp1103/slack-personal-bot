@@ -17,7 +17,7 @@ if [ "$EVENT" = "message" ]; then
     "event": {
       "type": "message",
       "user": "'"${MY_SLACK_USER_ID}"'",
-      "channel": "'"${SLACK_REVIEW_CHANNEL}"'",
+      "channel": "'"${SLACK_REVIEW_CODE_CHANNEL}"'",
       "text": "PR ready for review UP-68162 https://github.com/org/repo/pull/1",
       "ts": "1712345678.901234"
     }
@@ -32,7 +32,7 @@ elif [ "$EVENT" = "qa-ready" ]; then
       "item_user": "'"${MY_SLACK_USER_ID}"'",
       "item": {
         "type": "message",
-        "channel": "'"${SLACK_REVIEW_CHANNEL}"'",
+        "channel": "'"${SLACK_REVIEW_CODE_CHANNEL}"'",
         "ts": "1712345678.901234"
       }
     }
@@ -47,7 +47,7 @@ elif [ "$EVENT" = "approve" ]; then
       "item_user": "UTEAMMATE",
       "item": {
         "type": "message",
-        "channel": "'"${SLACK_REVIEW_CHANNEL}"'",
+        "channel": "'"${SLACK_REVIEW_CODE_CHANNEL}"'",
         "ts": "1712345678.901234"
       }
     }

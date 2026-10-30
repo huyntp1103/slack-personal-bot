@@ -16,7 +16,7 @@ jest.mock('@slack/web-api', () => ({
   })),
 }));
 
-const { replyToThread, preview, reactToMessage, deleteMessage, deleteStartingReviewMessages, fetchMessage, fetchThreadReply, searchMyMessages, respondEphemeral, replaceOriginal } = require('../src/slack');
+const { replyToThread, preview, reactToMessage, deleteMessage, deleteStartingReviewMessages, clearChannelHistory, fetchMessage, fetchThreadReply, searchMyMessages, respondEphemeral, replaceOriginal } = require('../src/slack');
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -24,7 +24,7 @@ beforeEach(() => {
   mockReactionsAdd.mockResolvedValue({});
   mockChatDelete.mockResolvedValue({});
   mockReplies.mockResolvedValue({ messages: [] });
-  process.env.SLACK_PREVIEW_CHANNEL = 'C_PREVIEW';
+  process.env.SLACK_BOT_PRIVATE_CHANNEL_REVIEW_CODE = 'C_PREVIEW';
   delete process.env.DRY_RUN;
   delete process.env.SLACK_WORKSPACE;
   delete process.env.MY_SLACK_USER_ID;
@@ -83,7 +83,7 @@ describe('replyToThread — preview link', () => {
 
     await replyToThread('C0APHQYK456', '1778214715.118289', 'hello');
 
-    // First: preview to SLACK_PREVIEW_CHANNEL. Second: actual thread reply.
+    // First: preview to SLACK_BOT_PRIVATE_CHANNEL_REVIEW_CODE. Second: actual thread reply.
     expect(mockPostMessage).toHaveBeenCalledTimes(2);
     expect(mockPostMessage.mock.calls[1][0]).toEqual({
       channel: 'C0APHQYK456',
@@ -346,14 +346,14 @@ describe('replyToThread — failure handling and blocks', () => {
 
 describe('preview — postMessage failure', () => {
   test('logs but does not throw when the preview post fails', async () => {
-    process.env.SLACK_PREVIEW_CHANNEL = 'C_PREVIEW';
+    process.env.SLACK_BOT_PRIVATE_CHANNEL_REVIEW_CODE = 'C_PREVIEW';
     mockPostMessage.mockRejectedValue(new Error('channel_not_found'));
 
     await expect(preview('hello')).resolves.toBeUndefined();
   });
 
-  test('does nothing beyond logging when SLACK_PREVIEW_CHANNEL is unset', async () => {
-    delete process.env.SLACK_PREVIEW_CHANNEL;
+  test('does nothing beyond logging when SLACK_BOT_PRIVATE_CHANNEL_REVIEW_CODE is unset', async () => {
+    delete process.env.SLACK_BOT_PRIVATE_CHANNEL_REVIEW_CODE;
 
     await preview('hello');
 
@@ -574,5 +574,54 @@ describe('replaceOriginal', () => {
   test('returns false and swallows the error on a network failure', async () => {
     fetchMock.mockRejectedValue(new Error('network down'));
     expect(await replaceOriginal('https://hooks.slack.com/actions/x', 'done')).toBe(false);
+  });
+});
+
+describe('clearChannelHistory', () => {
+  test('deletes only bot messages, paginating, and counts failures', async () => {
+    mockHistory
+      .mockResolvedValueOnce({ messages: [{ ts: '1', bot_id: 'B1' }, { ts: '2', user: 'U1' }], response_metadata: { next_cursor: 'c2' } })
+      .mockResolvedValueOnce({ messages: [{ ts: '3', bot_id: 'B1' }], response_metadata: { next_cursor: '' } });
+    mockChatDelete.mockResolvedValueOnce({}).mockRejectedValueOnce(Object.assign(new Error('x'), { data: { error: 'cant_delete_message' } }));
+
+    const res = await clearChannelHistory('C_PREVIEW', null);
+
+    expect(res).toEqual({ deleted: 1, failed: 1 });
+    expect(mockHistory).toHaveBeenNthCalledWith(1, { channel: 'C_PREVIEW', limit: 200, cursor: undefined });
+    expect(mockHistory).toHaveBeenNthCalledWith(2, { channel: 'C_PREVIEW', limit: 200, cursor: 'c2' });
+    expect(mockChatDelete).toHaveBeenCalledTimes(2);
+  });
+
+  test('also deletes bot thread replies, before their root, skipping people\'s replies', async () => {
+    mockHistory.mockResolvedValue({ messages: [{ ts: '10', bot_id: 'B1', reply_count: 2 }] });
+    mockReplies.mockResolvedValue({
+      messages: [{ ts: '10', bot_id: 'B1' }, { ts: '11', bot_id: 'B1' }, { ts: '12', user: 'U1' }],
+    });
+
+    const res = await clearChannelHistory('C_PREVIEW', null);
+
+    expect(res).toEqual({ deleted: 2, failed: 0 });
+    expect(mockReplies).toHaveBeenCalledWith({ channel: 'C_PREVIEW', ts: '10', limit: 200, cursor: undefined });
+    expect(mockChatDelete.mock.calls.map(c => c[0].ts)).toEqual(['11', '10']);
+  });
+
+  test('a replies failure still deletes the roots', async () => {
+    mockHistory.mockResolvedValue({ messages: [{ ts: '10', bot_id: 'B1', reply_count: 1 }] });
+    mockReplies.mockRejectedValue(new Error('boom'));
+    expect(await clearChannelHistory('C_PREVIEW', null)).toEqual({ deleted: 1, failed: 0 });
+  });
+
+  test('a day bounds the history query to that day in Asia/Bangkok', async () => {
+    mockHistory.mockResolvedValue({ messages: [] });
+    await clearChannelHistory('C_PREVIEW', '2026-05-10');
+    const arg = mockHistory.mock.calls[0][0];
+    expect(arg.oldest).toBe(String(Date.parse('2026-05-09T17:00:00Z') / 1000));
+    expect(arg.latest).toBe(String(Date.parse('2026-05-10T16:59:59.999Z') / 1000));
+    expect(arg.inclusive).toBe(true);
+  });
+
+  test('a history failure deletes nothing', async () => {
+    mockHistory.mockRejectedValue(new Error('boom'));
+    expect(await clearChannelHistory('C_PREVIEW', null)).toEqual({ deleted: 0, failed: 0 });
   });
 });

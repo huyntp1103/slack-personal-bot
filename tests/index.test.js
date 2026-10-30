@@ -18,6 +18,7 @@ jest.mock('../src/slack', () => ({
   deleteMessage: jest.fn(),
   fetchThreadReply: jest.fn(),
   deleteStartingReviewMessages: jest.fn(),
+  clearChannelHistory: jest.fn(),
 }));
 jest.mock('../src/github', () => ({
   fetchPrData: jest.fn(),
@@ -31,13 +32,14 @@ jest.mock('../src/review', () => ({
   cancelReview: jest.fn(),
 }));
 
+const { clearChannelHistory } = require('../src/slack');
 const { transitionIssue, addComment, getIssue, getIssueSummary } = require('../src/jira');
 const { fetchMessage, searchMyMessages, preview, replyToThread, buildThreadLink, respondEphemeral, replaceOriginal, reactToMessage, deleteMessage, fetchThreadReply, deleteStartingReviewMessages } = require('../src/slack');
 const { fetchPrData, fetchPrTitle, fetchPrCommits, approvePr } = require('../src/github');
 const { runPrReview, reviewSkipReason, cancelReview } = require('../src/review');
 
 process.env.MY_SLACK_USER_ID = 'U093ZDNQJF3';
-process.env.SLACK_REVIEW_CHANNEL = 'C05F65TBB9P';
+process.env.SLACK_REVIEW_CODE_CHANNEL = 'C05F65TBB9P';
 process.env.JIRA_HOST = 'https://everfit.atlassian.net/';
 process.env.ID_IN_REVIEW = '41';
 process.env.ID_QA_READY = '51';
@@ -726,6 +728,73 @@ describe('POST /slack/commands — /tickets', () => {
   });
 });
 
+describe('POST /slack/commands — /clear-history', () => {
+  let fetchMock;
+
+  const send = text =>
+    request(app)
+      .post('/slack/commands')
+      .type('form')
+      .send({ command: '/clear-history', text, user_id: 'U093ZDNQJF3', response_url: 'https://hooks.slack.com/x' });
+
+  beforeEach(() => {
+    fetchMock = jest.fn().mockResolvedValue({ ok: true });
+    global.fetch = fetchMock;
+    process.env.SLACK_BOT_PRIVATE_CHANNEL_REVIEW_CODE = 'C_PREVIEW';
+    clearChannelHistory.mockResolvedValue({ deleted: 3, failed: 0 });
+  });
+
+  afterEach(() => {
+    delete global.fetch;
+  });
+
+  const lastText = () => JSON.parse(fetchMock.mock.calls.at(-1)[1].body).text;
+
+  test('a date clears that day', async () => {
+    await send('2026-05-10');
+    await waitUntil(() => fetchMock.mock.calls.length > 0);
+    expect(clearChannelHistory).toHaveBeenCalledWith('C_PREVIEW', '2026-05-10');
+    expect(lastText()).toBe('🧹 Cleared 3 messages from the preview channel (2026-05-10).');
+  });
+
+  test('no argument defaults to today', async () => {
+    await send('');
+    await waitUntil(() => fetchMock.mock.calls.length > 0);
+    expect(clearChannelHistory).toHaveBeenCalledWith('C_PREVIEW', expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/));
+  });
+
+  test('"all" clears everything, case-insensitively, and reports failures', async () => {
+    clearChannelHistory.mockResolvedValue({ deleted: 1, failed: 2 });
+    await send('ALL');
+    await waitUntil(() => fetchMock.mock.calls.length > 0);
+    expect(clearChannelHistory).toHaveBeenCalledWith('C_PREVIEW', null);
+    expect(lastText()).toBe('🧹 Cleared 1 message from the preview channel (all history) — 2 could not be deleted.');
+  });
+
+  test('rejects an invalid date without deleting anything', async () => {
+    await send('yesterday');
+    await waitUntil(() => fetchMock.mock.calls.length > 0);
+    expect(clearChannelHistory).not.toHaveBeenCalled();
+    expect(lastText()).toBe('❌ Invalid date `yesterday` — use YYYY-MM-DD or `all`.');
+  });
+
+  test('refuses when SLACK_BOT_PRIVATE_CHANNEL_REVIEW_CODE is unset', async () => {
+    delete process.env.SLACK_BOT_PRIVATE_CHANNEL_REVIEW_CODE;
+    await send('all');
+    await waitUntil(() => fetchMock.mock.calls.length > 0);
+    expect(clearChannelHistory).not.toHaveBeenCalled();
+    expect(lastText()).toContain('SLACK_BOT_PRIVATE_CHANNEL_REVIEW_CODE');
+  });
+
+  test('ignores non-owners', async () => {
+    await request(app)
+      .post('/slack/commands')
+      .type('form')
+      .send({ command: '/clear-history', text: 'all', user_id: 'UOTHER', response_url: 'https://hooks.slack.com/x' });
+    expect(clearChannelHistory).not.toHaveBeenCalled();
+  });
+});
+
 describe('POST /slack/commands — signature verification', () => {
   const crypto = require('crypto');
   const SECRET = 'test-signing-secret';
@@ -812,7 +881,7 @@ function approvePayload(overrides = {}) {
       item_user: 'UTEAMMATE',        // teammate posted the message
       item: {
         type: 'message',
-        channel: 'C05F65TBB9P',      // SLACK_REVIEW_CHANNEL
+        channel: 'C05F65TBB9P',      // SLACK_REVIEW_CODE_CHANNEL
         ts: '1712345678.901234',
       },
       ...overrides,
@@ -872,7 +941,7 @@ describe('handleApproveReaction', () => {
     expect(approvePr).not.toHaveBeenCalled();
   });
 
-  test('ignores reactions from outside SLACK_REVIEW_CHANNEL', async () => {
+  test('ignores reactions from outside SLACK_REVIEW_CODE_CHANNEL', async () => {
     await request(app).post('/slack/events').send(
       approvePayload({ item: { type: 'message', channel: 'COTHER', ts: '1.2' } })
     );
@@ -973,7 +1042,7 @@ function eyesPayload(overrides = {}) {
       item_user: 'UTEAMMATE',
       item: {
         type: 'message',
-        channel: 'C05F65TBB9P', // SLACK_REVIEW_CHANNEL
+        channel: 'C05F65TBB9P', // SLACK_REVIEW_CODE_CHANNEL
         ts: '1712345678.901234',
       },
       ...overrides,
@@ -1276,7 +1345,7 @@ describe('handleReviewRequestReaction', () => {
     expect(runPrReview).not.toHaveBeenCalled();
   });
 
-  test('ignores 👀 outside SLACK_REVIEW_CHANNEL', async () => {
+  test('ignores 👀 outside SLACK_REVIEW_CODE_CHANNEL', async () => {
     await request(app).post('/slack/events').send(
       eyesPayload({ item: { type: 'message', channel: 'COTHER', ts: '1.2' } })
     );
@@ -1799,7 +1868,7 @@ function wastebasketPayload(overrides = {}) {
       item_user: 'UTEAMMATE',
       item: {
         type: 'message',
-        channel: 'C05F65TBB9P', // SLACK_REVIEW_CHANNEL
+        channel: 'C05F65TBB9P', // SLACK_REVIEW_CODE_CHANNEL
         ts: '1712345678.901234',
       },
       ...overrides,
@@ -1819,7 +1888,7 @@ describe('handleDeleteStartingReviewsReaction', () => {
 
     expect(deleteStartingReviewMessages).toHaveBeenCalledWith('C05F65TBB9P', '1712345678.901234');
     expect(preview).toHaveBeenCalledWith(
-      `🗑️ *Deleted 2 "Starting review" messages*\n<${REVIEW_THREAD_LINK}|Go to thread>`,
+      `🗑️ *Deleted 2 "Starting review" messages*`,
       { tag: false }
     );
   });
@@ -1829,7 +1898,7 @@ describe('handleDeleteStartingReviewsReaction', () => {
     await request(app).post('/slack/events').send(wastebasketPayload());
 
     expect(preview).toHaveBeenCalledWith(
-      `🗑️ *Deleted 1 "Starting review" message*\n<${REVIEW_THREAD_LINK}|Go to thread>`,
+      `🗑️ *Deleted 1 "Starting review" message*`,
       { tag: false }
     );
   });
@@ -1853,7 +1922,7 @@ describe('handleDeleteStartingReviewsReaction', () => {
     expect(deleteStartingReviewMessages).not.toHaveBeenCalled();
   });
 
-  test('ignores 🗑️ outside SLACK_REVIEW_CHANNEL', async () => {
+  test('ignores 🗑️ outside SLACK_REVIEW_CODE_CHANNEL', async () => {
     await request(app).post('/slack/events').send(
       wastebasketPayload({ item: { type: 'message', channel: 'COTHER', ts: '1.2' } })
     );
@@ -1905,29 +1974,12 @@ describe('handleDeleteBotReply (🗑️ on a thread reply)', () => {
       ...overrides,
     }));
 
-  test('deletes a reply the bot posted and previews it with a thread link', async () => {
+  test('deletes a reply the bot posted and previews it without a thread link', async () => {
     await reactOnReply();
 
     expect(fetchThreadReply).toHaveBeenCalledWith('C05F65TBB9P', REPLY_TS);
     expect(deleteMessage).toHaveBeenCalledWith('C05F65TBB9P', REPLY_TS);
-    expect(buildThreadLink).toHaveBeenCalledWith('C05F65TBB9P', ROOT_TS);
-    expect(preview).toHaveBeenCalledWith(
-      `🗑️ *Deleted the bot's reply*\n<${REVIEW_THREAD_LINK}|Go to thread>`,
-      { tag: false }
-    );
-  });
-
-  test('falls back to the reply ts for the thread link when the reply carries no thread_ts', async () => {
-    fetchThreadReply.mockResolvedValue({ ts: REPLY_TS, bot_id: 'B123' });
-    await reactOnReply();
-
-    expect(buildThreadLink).toHaveBeenCalledWith('C05F65TBB9P', REPLY_TS);
-  });
-
-  test('omits the thread line when SLACK_WORKSPACE is unset', async () => {
-    buildThreadLink.mockReturnValue(null);
-    await reactOnReply();
-
+    expect(buildThreadLink).not.toHaveBeenCalled();
     expect(preview).toHaveBeenCalledWith(`🗑️ *Deleted the bot's reply*`, { tag: false });
   });
 
@@ -1953,7 +2005,7 @@ describe('handleDeleteBotReply (🗑️ on a thread reply)', () => {
 
     expect(preview).toHaveBeenCalledTimes(1);
     expect(preview).toHaveBeenCalledWith(
-      `⚠️ *Couldn't delete the bot's reply*\n\`cant_delete_message\`\n<${REVIEW_THREAD_LINK}|Go to thread>`,
+      `⚠️ *Couldn't delete the bot's reply*\n\`cant_delete_message\``,
       { tag: false }
     );
   });
@@ -1964,7 +2016,7 @@ describe('handleDeleteBotReply (🗑️ on a thread reply)', () => {
     expect(deleteMessage).not.toHaveBeenCalled();
   });
 
-  test('ignores 🗑️ on a reply outside SLACK_REVIEW_CHANNEL', async () => {
+  test('ignores 🗑️ on a reply outside SLACK_REVIEW_CODE_CHANNEL', async () => {
     await reactOnReply({ item: { type: 'message', channel: 'COTHER', ts: REPLY_TS } });
     expect(fetchThreadReply).not.toHaveBeenCalled();
     expect(deleteMessage).not.toHaveBeenCalled();
@@ -2940,9 +2992,9 @@ describe('POST /slack/interactive — Cancel review button', () => {
   });
 });
 
-// ─── multiple SLACK_REVIEW_CHANNEL values ─────────────────────────────────────
+// ─── multiple SLACK_REVIEW_CODE_CHANNEL values ─────────────────────────────────────
 
-describe('SLACK_REVIEW_CHANNEL with several channels', () => {
+describe('SLACK_REVIEW_CODE_CHANNEL with several channels', () => {
   const FIRST = 'C05F65TBB9P';
   const SECOND = 'C073WMRV127';
   const ROOT_TS = '1712345678.901234';
@@ -2950,7 +3002,7 @@ describe('SLACK_REVIEW_CHANNEL with several channels', () => {
 
   beforeEach(() => {
     // Whitespace and a trailing comma are tolerated.
-    process.env.SLACK_REVIEW_CHANNEL = ` ${FIRST} , ${SECOND} ,`;
+    process.env.SLACK_REVIEW_CODE_CHANNEL = ` ${FIRST} , ${SECOND} ,`;
     replyToThread.mockResolvedValue(undefined);
     buildThreadLink.mockReturnValue(null);
     reviewSkipReason.mockReturnValue(null);
@@ -2963,7 +3015,7 @@ describe('SLACK_REVIEW_CHANNEL with several channels', () => {
   });
 
   afterEach(() => {
-    process.env.SLACK_REVIEW_CHANNEL = FIRST;
+    process.env.SLACK_REVIEW_CODE_CHANNEL = FIRST;
   });
 
   test.each([FIRST, SECOND])('In Review message trigger works in %s', async channel => {
@@ -3022,10 +3074,10 @@ describe('SLACK_REVIEW_CHANNEL with several channels', () => {
     expect(runPrReview).not.toHaveBeenCalled();
   });
 
-  test('with SLACK_REVIEW_CHANNEL unset or empty nothing is handled (not even a channel-less event)', async () => {
+  test('with SLACK_REVIEW_CODE_CHANNEL unset or empty nothing is handled (not even a channel-less event)', async () => {
     for (const value of [undefined, '', ' , ']) {
-      if (value === undefined) delete process.env.SLACK_REVIEW_CHANNEL;
-      else process.env.SLACK_REVIEW_CHANNEL = value;
+      if (value === undefined) delete process.env.SLACK_REVIEW_CODE_CHANNEL;
+      else process.env.SLACK_REVIEW_CODE_CHANNEL = value;
 
       await request(app).post('/slack/events').send(reviewMessagePayload({ channel: undefined }));
       await request(app).post('/slack/events').send(eyesPayload(inChannel(undefined)));
@@ -3038,7 +3090,7 @@ describe('SLACK_REVIEW_CHANNEL with several channels', () => {
   });
 
   test('a single-channel value keeps working as before', async () => {
-    process.env.SLACK_REVIEW_CHANNEL = FIRST;
+    process.env.SLACK_REVIEW_CODE_CHANNEL = FIRST;
     await request(app).post('/slack/events').send(eyesPayload(inChannel(FIRST)));
     await waitUntil(() => runPrReview.mock.calls.length === 1);
 

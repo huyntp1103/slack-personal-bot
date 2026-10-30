@@ -5,7 +5,7 @@ require('dotenv').config();
 const crypto = require('crypto');
 const express = require('express');
 const { transitionIssue, addComment, getIssue, getIssueSummary } = require('./jira');
-const { replyToThread, fetchMessage, searchMyMessages, preview, buildThreadLink, respondEphemeral, replaceOriginal, reactToMessage, deleteMessage, fetchThreadReply, deleteStartingReviewMessages } = require('./slack');
+const { replyToThread, fetchMessage, searchMyMessages, preview, buildThreadLink, respondEphemeral, replaceOriginal, reactToMessage, deleteMessage, fetchThreadReply, deleteStartingReviewMessages, clearChannelHistory } = require('./slack');
 const { extractJiraKey, extractAllJiraKeys, extractSlackThread, extractPrUrls } = require('./utils');
 const { fetchPrTitle, fetchPrData, fetchPrCommits, approvePr } = require('./github');
 const { runPrReview, reviewSkipReason, cancelReview } = require('./review');
@@ -55,14 +55,14 @@ const acknowledgeablePrs = new Set();
 const reviewedHeadShas = new Map();
 
 /**
- * Review channels, from SLACK_REVIEW_CHANNEL — one channel ID or several
+ * Review channels, from SLACK_REVIEW_CODE_CHANNEL — one channel ID or several
  * comma-separated (`C05F65TBB9P,C073WMRV127`). Read on every call so a changed
  * env value is picked up without a restart-order dependency (and tests can set it).
  *
  * @returns {string[]}
  */
 function reviewChannels() {
-  return (process.env.SLACK_REVIEW_CHANNEL || '')
+  return (process.env.SLACK_REVIEW_CODE_CHANNEL || '')
     .split(',')
     .map(id => id.trim())
     .filter(Boolean);
@@ -231,6 +231,13 @@ app.post('/slack/commands', async (req, res) => {
     return;
   }
 
+  if (command === '/clear-history') {
+    runClearHistoryCommand(text, response_url).catch(err => {
+      console.log('[Slack cmd] /clear-history failed:', err.message);
+    });
+    return;
+  }
+
   await postToResponseUrl(response_url, {
     response_type: 'ephemeral',
     text: `❌ Unknown command \`${command}\`.`,
@@ -252,6 +259,39 @@ async function runTicketsByDayCommand(text, responseUrl) {
   await postToResponseUrl(responseUrl, {
     response_type: 'ephemeral',
     text: formatAuditReport(day, messagesScanned, tickets),
+  });
+}
+
+/**
+ * `/clear-history [YYYY-MM-DD|all]` — deletes the bot's own messages in
+ * SLACK_BOT_PRIVATE_CHANNEL_REVIEW_CODE for one day (Asia/Bangkok, default today) or all of them.
+ */
+async function runClearHistoryCommand(text, responseUrl) {
+  const arg = (text || '').trim().toLowerCase() || todayInBangkok();
+  const all = arg === 'all';
+
+  if (!all && !/^\d{4}-\d{2}-\d{2}$/.test(arg)) {
+    await postToResponseUrl(responseUrl, {
+      response_type: 'ephemeral',
+      text: `❌ Invalid date \`${arg}\` — use YYYY-MM-DD or \`all\`.`,
+    });
+    return;
+  }
+
+  const channel = process.env.SLACK_BOT_PRIVATE_CHANNEL_REVIEW_CODE;
+  if (!channel) {
+    await postToResponseUrl(responseUrl, {
+      response_type: 'ephemeral',
+      text: '❌ `SLACK_BOT_PRIVATE_CHANNEL_REVIEW_CODE` is not set — nothing to clear.',
+    });
+    return;
+  }
+
+  const { deleted, failed } = await clearChannelHistory(channel, all ? null : arg);
+  const scope = all ? 'all history' : arg;
+  await postToResponseUrl(responseUrl, {
+    response_type: 'ephemeral',
+    text: `🧹 Cleared ${deleted} message${deleted === 1 ? '' : 's'} from the preview channel (${scope})${failed ? ` — ${failed} could not be deleted` : ''}.`,
   });
 }
 
@@ -483,7 +523,7 @@ async function handleApproveReaction(event) {
  * Per PR: reply in the message's thread that the review started, run
  * `claude -p "/review-pr <n>"` in the local clone (it posts 🔴 High + 🟡 Medium
  * findings to the PR itself), then reply again with the comment URL and ping me in
- * SLACK_PREVIEW_CHANNEL.
+ * SLACK_BOT_PRIVATE_CHANNEL_REVIEW_CODE.
  */
 async function handleReviewRequestReaction(event) {
   if (event.user !== process.env.MY_SLACK_USER_ID) return;
@@ -552,14 +592,11 @@ async function handleDeleteStartingReviewsReaction(event) {
     return;
   }
 
-  const threadLink = buildThreadLink(channel, threadTs);
-  const threadLine = threadLink ? `\n<${threadLink}|Go to thread>` : '';
-
   const deleted = await deleteStartingReviewMessages(channel, threadTs);
 
   console.log(`[Slack] 🗑️ — deleted ${deleted} "Starting review" message(s) in ${channel}/${threadTs}`);
   await preview(
-    `🗑️ *Deleted ${deleted} "Starting review" message${deleted === 1 ? '' : 's'}*${threadLine}`,
+    `🗑️ *Deleted ${deleted} "Starting review" message${deleted === 1 ? '' : 's'}*`,
     { tag: false }
   );
 }
@@ -582,16 +619,13 @@ async function handleDeleteBotReply(channel, ts) {
     return;
   }
 
-  const threadLink = buildThreadLink(channel, reply.thread_ts || ts);
-  const threadLine = threadLink ? `\n<${threadLink}|Go to thread>` : '';
-
   const result = await deleteMessage(channel, ts);
   if (!result.ok) {
-    await preview(`⚠️ *Couldn't delete the bot's reply*\n\`${result.error}\`${threadLine}`, { tag: false });
+    await preview(`⚠️ *Couldn't delete the bot's reply*\n\`${result.error}\``, { tag: false });
     return;
   }
   console.log(`[Slack] 🗑️ — deleted bot reply ${ts} in ${channel}`);
-  await preview(`🗑️ *Deleted the bot's reply*${threadLine}`, { tag: false });
+  await preview(`🗑️ *Deleted the bot's reply*`, { tag: false });
 }
 
 /**

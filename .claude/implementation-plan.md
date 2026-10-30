@@ -35,7 +35,7 @@ GET /jira/tickets-by-day?date=YYYY-MM-DD ────────────►
    - other targets: no restriction
 3. If → In Progress: check customfield_10010 (sprint array) — block if any sprint.id === 249
 4. If → In Review: call createWorklog(issueKey) — Scrum Master rule, must precede the transition
-5. Emit preview via preview() — terminal log + SLACK_PREVIEW_CHANNEL post (owner-tagged)
+5. Emit preview via preview() — terminal log + SLACK_BOT_PRIVATE_CHANNEL_REVIEW_CODE post (owner-tagged)
 6. Call doTransition
 7. Return true on success, false on skip or error
 ```
@@ -50,7 +50,7 @@ Callers check the return value — `addComment` and `replyToThread` are only cal
 
 ```
 1. Filter: user === MY_SLACK_USER_ID
-2. Filter: channel === SLACK_REVIEW_CHANNEL
+2. Filter: channel === SLACK_REVIEW_CODE_CHANNEL
 3. Filter: root message (no thread_ts or thread_ts === ts)
 4. Strip Slack angle-bracket URL wrapping: <https://...> → https://...
 5. Match GitHub PR URL regex
@@ -61,7 +61,7 @@ Callers check the return value — `addComment` and `replyToThread` are only cal
 
 ## reaction_added Dispatch
 
-The `/slack/events` route filters `reaction === 'white_check_mark'` and channel `SLACK_REVIEW_CHANNEL`, then routes by `event.item_user`:
+The `/slack/events` route filters `reaction === 'white_check_mark'` and channel `SLACK_REVIEW_CODE_CHANNEL`, then routes by `event.item_user`:
 
 - `item_user === MY_SLACK_USER_ID` → `handleReactionAdded` (QA Ready flow)
 - otherwise → `handleApproveReaction` (PR approve flow)
@@ -107,7 +107,7 @@ The `/slack/events` route filters `reaction === 'white_check_mark'` and channel 
 5. Promise.all → getIssueSummary(key) for each key (null on failure)
 6. formatAuditReport → one ticket per line: <JIRA_HOST/browse/KEY|KEY>: summary
 7. Slash command: ack ephemeral "Running" within 3s, then POST report to response_url (ephemeral)
-   GET endpoint: emit preview to SLACK_PREVIEW_CHANNEL (untagged), return JSON
+   GET endpoint: emit preview to SLACK_BOT_PRIVATE_CHANNEL_REVIEW_CODE (untagged), return JSON
 8. Slash command silently 200s for any user_id !== MY_SLACK_USER_ID
 ```
 
@@ -134,7 +134,7 @@ Skip Slack retries (X-Slack-Retry-Num header)
 
 ## Preview & Dry Run Mode
 
-`preview(text, opts?)` always logs `[PREVIEW] ...` to terminal and (if `SLACK_PREVIEW_CHANNEL` is set) posts to that channel. Default suffixes the text with `\n<@MY_SLACK_USER_ID>` for a Slack ping; opt out with `{ tag: false }` (currently used by audit reports and PR-approve previews). The replyToThread preview includes a clickable archive URL when `SLACK_WORKSPACE` is set.
+`preview(text, opts?)` always logs `[PREVIEW] ...` to terminal and (if `SLACK_BOT_PRIVATE_CHANNEL_REVIEW_CODE` is set) posts to that channel. Default suffixes the text with `\n<@MY_SLACK_USER_ID>` for a Slack ping; opt out with `{ tag: false }` (currently used by audit reports and PR-approve previews). The replyToThread preview includes a clickable archive URL when `SLACK_WORKSPACE` is set.
 
 `DRY_RUN=true` only suppresses the real `chat.postMessage` call inside `replyToThread`. Jira transitions, comments, worklogs, and PR approvals still execute. Preview output is unaffected by `DRY_RUN`.
 

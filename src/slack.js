@@ -133,7 +133,7 @@ async function searchMyMessages(query) {
 }
 
 /**
- * Posts a preview message to terminal and SLACK_PREVIEW_CHANNEL (if configured).
+ * Posts a preview message to terminal and SLACK_BOT_PRIVATE_CHANNEL_REVIEW_CODE (if configured).
  * Always runs regardless of DRY_RUN, so you can audit actions before/while they execute.
  *
  * @param {string} text
@@ -145,7 +145,7 @@ async function preview(text, opts = {}) {
 
   console.log(`[PREVIEW] ${finalText}`);
 
-  const channel = process.env.SLACK_PREVIEW_CHANNEL;
+  const channel = process.env.SLACK_BOT_PRIVATE_CHANNEL_REVIEW_CODE;
   if (!channel) return;
 
   try {
@@ -183,6 +183,66 @@ async function reactToMessage(channel, ts, emoji) {
     console.log(`[Slack] reactToMessage(${channel}, ${ts}, ${emoji}) failed:`, err.message);
     return { ok: false, error: err.data?.error || err.message };
   }
+}
+
+/**
+ * Deletes the bot's own messages — top-level and thread replies — in a channel — used by `/clear-history`
+ * to empty SLACK_BOT_PRIVATE_CHANNEL_REVIEW_CODE. `day` (YYYY-MM-DD, Asia/Bangkok) limits it to
+ * that day; null clears everything. Messages not posted by a bot are skipped
+ * (Slack would refuse them anyway). Paginates conversations.history, and conversations.replies for threads.
+ *
+ * @returns {Promise<{deleted: number, failed: number}>}
+ */
+async function clearChannelHistory(channel, day) {
+  const range = {};
+  if (day) {
+    range.oldest = String(new Date(`${day}T00:00:00+07:00`).getTime() / 1000);
+    range.latest = String(new Date(`${day}T23:59:59.999+07:00`).getTime() / 1000);
+    range.inclusive = true;
+  }
+
+  const roots = [];
+  let cursor;
+  try {
+    do {
+      const res = await slack.conversations.history({ channel, limit: 200, cursor, ...range });
+      roots.push(...(res.messages || []));
+      cursor = res.response_metadata?.next_cursor || undefined;
+    } while (cursor);
+  } catch (err) {
+    console.log(`[Slack] clearChannelHistory(${channel}) history failed:`, err.message);
+  }
+
+  // Thread replies first, then the roots they hang off.
+  const timestamps = [];
+  for (const root of roots) {
+    if (root.reply_count > 0) {
+      let replyCursor;
+      try {
+        do {
+          const res = await slack.conversations.replies({ channel, ts: root.ts, limit: 200, cursor: replyCursor });
+          for (const m of res.messages || []) {
+            if (m.ts !== root.ts && m.bot_id) timestamps.push(m.ts);
+          }
+          replyCursor = res.response_metadata?.next_cursor || undefined;
+        } while (replyCursor);
+      } catch (err) {
+        console.log(`[Slack] clearChannelHistory(${channel}) replies of ${root.ts} failed:`, err.message);
+      }
+    }
+  }
+  for (const root of roots) {
+    if (root.bot_id) timestamps.push(root.ts);
+  }
+
+  let deleted = 0;
+  let failed = 0;
+  for (const ts of timestamps) {
+    const result = await deleteMessage(channel, ts);
+    if (result.ok) deleted++;
+    else failed++;
+  }
+  return { deleted, failed };
 }
 
 /**
@@ -320,6 +380,7 @@ module.exports = {
   preview,
   reactToMessage,
   deleteMessage,
+  clearChannelHistory,
   deleteStartingReviewMessages,
   searchMyMessages,
   buildThreadLink,
