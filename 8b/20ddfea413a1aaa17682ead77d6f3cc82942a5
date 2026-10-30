@@ -1,0 +1,46 @@
+CLAUDE.md
+  s_2a01cb6fbe8883::t_0ee43e0e476393 54,80,88,100,109,112,121,124,136,155,169,196
+  s_2a01cb6fbe8883::t_183277ee8599f9 119
+.env.example
+  s_2a01cb6fbe8883::t_0ee43e0e476393 11,26
+.claude/commands/test-slack-event.md
+  s_2a01cb6fbe8883::t_0ee43e0e476393 20,35,50
+.claude/implementation-plan.md
+  s_2a01cb6fbe8883::t_0ee43e0e476393 38,53,64,110,137
+src/slack.js
+  s_2a01cb6fbe8883::t_0ee43e0e476393 136,148,190
+  s_2a01cb6fbe8883::t_b180db8861c4e9 191,193-203,205-208,210-213,236-247,383
+  s_2a01cb6fbe8883::t_2ea0f1ab0aa945 189,192,204,209,214-235
+  s_2a01cb6fbe8883::t_8b4e3a6f55935c 188
+tests/slack.test.js
+  s_2a01cb6fbe8883::t_0ee43e0e476393 27,86,349,355-356
+  s_2a01cb6fbe8883::t_2ea0f1ab0aa945 595-613
+  s_2a01cb6fbe8883::t_183277ee8599f9 19,579-594,614-626
+  s_2a01cb6fbe8883::t_cb12c015b3d010 627
+.claude/commands/check-env.md
+  s_2a01cb6fbe8883::t_0ee43e0e476393 6
+src/index.js
+  s_2a01cb6fbe8883::t_b180db8861c4e9 8,234-240,265-266,268-280,282-284,286-294,599,624,628
+  s_2a01cb6fbe8883::t_0ee43e0e476393 58,65,267,281,285,526
+  s_2a01cb6fbe8883::t_eeef318893745e 295-297
+tests/index.test.js
+  s_2a01cb6fbe8883::t_ebb65ca4d85557 1977,1982
+  s_2a01cb6fbe8883::t_183277ee8599f9 21,35,731-742,744-780,783-785,787-797,1891,1901,2008
+  s_2a01cb6fbe8883::t_0ee43e0e476393 42,743,781-782,786,884,944,1045,1348,1871,1925,2019,2995,2997,3005,3018,3077,3079-3080,3093
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "8b20ddfea413a1aaa17682ead77d6f3cc82942a5",
+  "prompts": {},
+  "sessions": {
+    "s_2a01cb6fbe8883": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "7772f74f-6bb8-4844-8750-55b17fb12113",
+        "model": "claude-sonnet-5-5"
+      },
+      "human_author": "Huy Nguyen Nhat <huyntp1103@gmail.com>"
+    }
+  }
+}
