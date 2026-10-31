@@ -10,6 +10,7 @@ const { spawn } = require('child_process');
 const fs = require('fs');
 const {
   runClientReport,
+  cancelClientReport,
   clientReportSkipReason,
   extractClientReportSummary,
   extractSessionId,
@@ -203,6 +204,50 @@ describe('runClientReport', () => {
     } finally {
       jest.useRealTimers();
     }
+  });
+});
+
+describe('cancelClientReport', () => {
+  test('kills the process registered under the run key; the run resolves as cancelled', async () => {
+    const child = fakeChild();
+    spawn.mockReturnValue(child);
+    const promise = runClientReport(LINK, { runKey: 'C1:1.1' });
+
+    expect(cancelClientReport('C1:1.1')).toBe(true);
+    expect(child.kill).toHaveBeenCalledWith('SIGKILL');
+    child.emit('close', null);
+
+    expect(await promise).toEqual({ ok: false, cancelled: true, error: 'cancelled', output: '' });
+    expect(cancelClientReport('C1:1.1')).toBe(false); // released once the process is gone
+  });
+
+  test('false for an unknown key, and after a run finished on its own', async () => {
+    expect(cancelClientReport('nope')).toBe(false);
+
+    const child = fakeChild();
+    spawn.mockReturnValue(child);
+    const promise = runClientReport(LINK, { runKey: 'C1:2.2' });
+    child.stdout.emit('data', 'CLIENT_REPORT_SUMMARY_START\nx\nCLIENT_REPORT_SUMMARY_END');
+    child.emit('close', 0);
+    expect((await promise).ok).toBe(true);
+
+    expect(cancelClientReport('C1:2.2')).toBe(false);
+    expect(child.kill).not.toHaveBeenCalled();
+  });
+
+  test('a spawn error releases the key', async () => {
+    const child = fakeChild();
+    spawn.mockReturnValue(child);
+    const promise = runClientReport(LINK, { runKey: 'C1:3.3' });
+    child.emit('error', new Error('ENOENT'));
+    await promise;
+    expect(cancelClientReport('C1:3.3')).toBe(false);
+  });
+
+  test('a run without a key is not cancellable', () => {
+    spawn.mockReturnValue(fakeChild());
+    runClientReport(LINK);
+    expect(cancelClientReport(undefined)).toBe(false);
   });
 });
 

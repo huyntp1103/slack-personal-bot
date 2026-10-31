@@ -63,17 +63,19 @@ async function replyToThread(channel, ts, text, opts = {}) {
  *
  * @param {string} channel
  * @param {string} text
- * @param {{threadTs?: string, blocks?: object[]}} [opts] - `blocks` (Block Kit)
- *   renders instead of `text`, which stays as the notification fallback
+ * @param {{threadTs?: string, blocks?: object[], unfurl?: boolean}} [opts] - `blocks` (Block Kit)
+ *   renders instead of `text`, which stays as the notification fallback; `unfurl: false`
+ *   posts links as plain links, without Slack's link/media previews
  * @returns {Promise<string|null>} the new message's ts, null when the post failed
  */
-async function postToChannel(channel, text, { threadTs, blocks } = {}) {
+async function postToChannel(channel, text, { threadTs, blocks, unfurl } = {}) {
   try {
     const res = await slack.chat.postMessage({
       channel,
       text,
       ...(blocks ? { blocks } : {}),
       ...(threadTs ? { thread_ts: threadTs } : {}),
+      ...(unfurl === false ? { unfurl_links: false, unfurl_media: false } : {}),
     });
     return res?.ts ?? null;
   } catch (err) {
@@ -230,8 +232,8 @@ async function reactToMessage(channel, ts, emoji) {
 }
 
 /**
- * Deletes the bot's own messages — top-level and thread replies — in a channel — used by `/clear-history`
- * to empty SLACK_BOT_PRIVATE_CHANNEL_REVIEW_CODE. `day` (YYYY-MM-DD, Asia/Bangkok) limits it to
+ * Deletes the bot's own messages — top-level and thread replies — in a channel — used by `/clear-message`
+ * to empty one of the SLACK_BOT_PRIVATE_CHANNEL* channels. `day` (YYYY-MM-DD, Asia/Bangkok) limits it to
  * that day; null clears everything. Messages not posted by a bot are skipped
  * (Slack would refuse them anyway). Paginates conversations.history, and conversations.replies for threads.
  *
@@ -428,16 +430,21 @@ async function respondEphemeral(responseUrl, text) {
  *
  * @param {string} responseUrl - payload.response_url from the interaction
  * @param {string} text - the full replacement message (also the notification fallback)
- * @param {{blocks?: object[]}} [opts]
+ * @param {{blocks?: object[], unfurl?: boolean}} [opts] - `unfurl: false` keeps links free of previews
  * @returns {Promise<boolean>} true when Slack accepted it (response_urls expire after 30 min)
  */
-async function replaceOriginal(responseUrl, text, { blocks } = {}) {
+async function replaceOriginal(responseUrl, text, { blocks, unfurl } = {}) {
   if (!responseUrl) return false;
   try {
     const res = await fetch(responseUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ replace_original: true, text, ...(blocks ? { blocks } : {}) }),
+      body: JSON.stringify({
+        replace_original: true,
+        text,
+        ...(blocks ? { blocks } : {}),
+        ...(unfurl === false ? { unfurl_links: false, unfurl_media: false } : {}),
+      }),
     });
     if (!res.ok) {
       console.log(`[Slack] replaceOriginal failed: ${res.status}`);

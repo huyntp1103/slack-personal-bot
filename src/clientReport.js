@@ -18,6 +18,10 @@ const MAX_ERROR_TAIL_CHARS = 2000;
 // Slack caps an ephemeral message well above this; stay comfortably under it.
 const MAX_SUMMARY_CHARS = 2800;
 
+// Running `claude` processes by caller-chosen run key, so a stuck run can be
+// killed from Slack (`cancelClientReport`) and started again.
+const activeRuns = new Map();
+
 /**
  * Extra system prompt for the headless run. The skill is written for an
  * interactive session (it may ask to confirm or for a missing mode), so this
@@ -173,11 +177,14 @@ function clientReportSkipReason() {
  * - `hint` + `resumeSessionId`: `claude -p "<follow-up>" --resume <id>` — the same
  *   session continues with everything it already traced
  *
+ * `runKey` registers the process for `cancelClientReport`; a killed run resolves
+ * `{ ok: false, cancelled: true, error: 'cancelled' }`.
+ *
  * @param {string} slackUrl - archive permalink of the thread's root message
- * @param {{model?: string, hint?: string, resumeSessionId?: string}} [opts]
- * @returns {Promise<{ok: boolean, summary?: string|null, sessionId?: string, output?: string, error?: string}>}
+ * @param {{model?: string, hint?: string, resumeSessionId?: string, runKey?: string}} [opts]
+ * @returns {Promise<{ok: boolean, summary?: string|null, sessionId?: string, output?: string, error?: string, cancelled?: boolean}>}
  */
-function runClientReport(slackUrl, { model, hint, resumeSessionId } = {}) {
+function runClientReport(slackUrl, { model, hint, resumeSessionId, runKey } = {}) {
   const skipReason = clientReportSkipReason();
   if (skipReason) return Promise.resolve({ ok: false, error: skipReason });
 
@@ -211,6 +218,11 @@ function runClientReport(slackUrl, { model, hint, resumeSessionId } = {}) {
     let stdout = '';
     let stderr = '';
     let timedOut = false;
+    let cancelled = false;
+    if (runKey) activeRuns.set(runKey, { child, cancel: () => { cancelled = true; child.kill('SIGKILL'); } });
+    const release = () => {
+      if (runKey && activeRuns.get(runKey)?.child === child) activeRuns.delete(runKey);
+    };
 
     const timer = setTimeout(() => {
       timedOut = true;
@@ -222,12 +234,15 @@ function runClientReport(slackUrl, { model, hint, resumeSessionId } = {}) {
 
     child.on('error', err => {
       clearTimeout(timer);
+      release();
       resolve({ ok: false, error: err.message });
     });
 
     child.on('close', code => {
       clearTimeout(timer);
+      release();
 
+      if (cancelled) return resolve({ ok: false, cancelled: true, error: 'cancelled', output: stdout });
       if (timedOut) {
         return resolve({ ok: false, error: `client report timed out after ${timeoutMinutes} min`, output: stdout });
       }
@@ -242,8 +257,22 @@ function runClientReport(slackUrl, { model, hint, resumeSessionId } = {}) {
   });
 }
 
+/**
+ * Kills the running client-report process registered under `runKey`.
+ *
+ * @param {string} runKey
+ * @returns {boolean} false when nothing is running under that key
+ */
+function cancelClientReport(runKey) {
+  const run = activeRuns.get(runKey);
+  if (!run) return false;
+  run.cancel();
+  return true;
+}
+
 module.exports = {
   runClientReport,
+  cancelClientReport,
   clientReportSkipReason,
   extractClientReportSummary,
   extractSessionId,

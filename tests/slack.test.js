@@ -574,6 +574,12 @@ describe('replaceOriginal', () => {
     expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({ replace_original: true, text: 'done', blocks });
   });
 
+  test('unfurl: false turns link and media previews off', async () => {
+    await replaceOriginal('https://hooks.slack.com/actions/x', 'done', { unfurl: false });
+
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({ replace_original: true, text: 'done', unfurl_links: false, unfurl_media: false });
+  });
+
   test('returns false without throwing when responseUrl is falsy', async () => {
     expect(await replaceOriginal(undefined, 'done')).toBe(false);
     expect(fetchMock).not.toHaveBeenCalled();
@@ -691,6 +697,18 @@ describe('postToChannel — blocks', () => {
     const blocks = [{ type: 'section', text: { type: 'mrkdwn', text: 'hi' } }];
     await postToChannel('CPRIVATE', 'hi', { threadTs: '1.1', blocks });
     expect(mockPostMessage).toHaveBeenCalledWith({ channel: 'CPRIVATE', text: 'hi', blocks, thread_ts: '1.1' });
+  });
+});
+
+describe('postToChannel — unfurl', () => {
+  test('unfurl: false sends unfurl_links and unfurl_media as false', async () => {
+    await postToChannel('C1', 'hi', { unfurl: false });
+    expect(mockPostMessage).toHaveBeenCalledWith({ channel: 'C1', text: 'hi', unfurl_links: false, unfurl_media: false });
+  });
+
+  test('by default Slack\'s own unfurling is left alone', async () => {
+    await postToChannel('C1', 'hi');
+    expect(mockPostMessage.mock.calls.at(-1)[0]).not.toHaveProperty('unfurl_links');
   });
 });
 
