@@ -5,10 +5,11 @@ require('dotenv').config();
 const crypto = require('crypto');
 const express = require('express');
 const { transitionIssue, addComment, getIssue, getIssueSummary } = require('./jira');
-const { replyToThread, fetchMessage, searchMyMessages, preview, buildThreadLink, respondEphemeral, replaceOriginal, reactToMessage, deleteMessage, fetchThreadReply, deleteStartingReviewMessages, clearChannelHistory } = require('./slack');
+const { replyToThread, fetchMessage, searchMyMessages, preview, buildThreadLink, respondEphemeral, postToChannel, fetchThreadMessages, replaceOriginal, reactToMessage, deleteMessage, fetchThreadReply, deleteStartingReviewMessages, clearChannelHistory, deleteThread } = require('./slack');
 const { extractJiraKey, extractAllJiraKeys, extractSlackThread, extractPrUrls } = require('./utils');
 const { fetchPrTitle, fetchPrData, fetchPrCommits, approvePr } = require('./github');
 const { runPrReview, reviewSkipReason, cancelReview } = require('./review');
+const { runClientReport, extractSessionId, extractNotePaths, deleteClientReportNote, sessionLine } = require('./clientReport');
 
 const ALLOWED_BASE_BRANCHES = ['develop', 'releasing_staging', 'main', 'master'];
 const NOTIFY_BASE_BRANCHES = ['develop', 'releasing_staging'];
@@ -28,6 +29,7 @@ function reviewModelFor(authorId) {
 const REVIEW_AGAIN_ACTION = 'review_pr_again';
 const REVIEW_CANCEL_ACTION = 'review_pr_cancel';
 const REVIEW_ACK_ACTION = 'review_pr_ack';
+const CLIENT_REPORT_STOP_ACTION = 'client_report_stop';
 // How many times teammates (anyone but me) may re-run a review from the button,
 // per PR. I'm unlimited — the cap only stops the button being hammered.
 const MAX_TEAMMATE_REVIEWS = 2;
@@ -35,6 +37,10 @@ const MAX_TEAMMATE_REVIEWS = 2;
 // PR URLs with a Claude review currently running — a second 👀 on the same PR is
 // ignored until the first run finishes (reviews take minutes and post to GitHub).
 const reviewsInFlight = new Set();
+
+// `<channel>:<ts>` of client-report threads being investigated — same duplicate
+// guard as `reviewsInFlight`, so a second 👀 can't start a second investigation.
+const clientReportsInFlight = new Set();
 
 // PR URL → number of "Review again" runs started by teammates. In memory only,
 // so a restart clears the budget; the cap is a courtesy guard, not a quota.
@@ -71,6 +77,44 @@ function reviewChannels() {
 /** Whether `channel` is one of the configured review channels. */
 function isReviewChannel(channel) {
   return Boolean(channel) && reviewChannels().includes(channel);
+}
+
+/**
+ * Client-report channels, from SLACK_CLIENT_REPORT_CHANNEL — one channel ID or
+ * several comma-separated. A 👀 on a root message there runs the everfit-api
+ * `client-report` skill instead of a PR review.
+ *
+ * @returns {string[]}
+ */
+function clientReportChannels() {
+  return (process.env.SLACK_CLIENT_REPORT_CHANNEL || '')
+    .split(',')
+    .map(id => id.trim())
+    .filter(Boolean);
+}
+
+/**
+ * My private channel for client reports (SLACK_BOT_PRIVATE_CHANNEL_CLIENT_REPORT):
+ * each 👀 copies the report here and the investigation's replies live in that
+ * copy's thread — permanent, unlike an ephemeral message — and a hint I write in
+ * the thread continues the investigation. Empty string when unset.
+ */
+function clientReportPrivateChannel() {
+  return (process.env.SLACK_BOT_PRIVATE_CHANNEL_CLIENT_REPORT || '').trim();
+}
+
+// Marks the root of a copied report, so only those threads take follow-up hints.
+const CLIENT_REPORT_COPY_HEADER = '📋 *Client report*';
+// Slack returns unicode emoji as `:shortcode:` in a stored message's text, so the
+// root is recognised in either form.
+const CLIENT_REPORT_COPY_RE = /^(?:📋|:clipboard:) \*Client report\*/;
+const CLIENT_REPORT_START_TEXT = 'Starting client report investigation. Will post results here shortly.';
+const CLIENT_REPORT_CONTINUE_TEXT = 'Continuing the investigation with your hint. Will post results here shortly.';
+const CLIENT_REPORT_HINT_TIP = '💬 _Reply in this thread with a hint to keep investigating._';
+
+/** Whether `channel` is one of the configured client-report channels. */
+function isClientReportChannel(channel) {
+  return Boolean(channel) && clientReportChannels().includes(channel);
 }
 
 const app = express();
@@ -114,7 +158,12 @@ app.post('/slack/events', async (req, res) => {
   if (!event) return;
 
   if (event.type === 'message') {
-    await handleReviewMessage(event);
+    if (event.channel && event.channel === clientReportPrivateChannel()) {
+      // A hint written in a copied client report's thread → continue the investigation
+      await handleClientReportFollowUp(event);
+    } else {
+      await handleReviewMessage(event);
+    }
   } else if (event.type === 'reaction_added' && event.reaction === 'white_check_mark') {
     // ✅ on my own message → QA Ready flow
     // ✅ on a teammate's message → approve their PR(s)
@@ -528,6 +577,7 @@ async function handleApproveReaction(event) {
 async function handleReviewRequestReaction(event) {
   if (event.user !== process.env.MY_SLACK_USER_ID) return;
   if (event.item.type !== 'message') return;
+  if (isClientReportChannel(event.item.channel)) return handleClientReportReaction(event);
   if (!isReviewChannel(event.item.channel)) return;
 
   const message = await fetchMessage(event.item.channel, event.item.ts);
@@ -562,6 +612,210 @@ async function handleReviewRequestReaction(event) {
       console.error(`[Review] ${prUrls[i]} failed unexpectedly:`, result.reason);
     }
   });
+}
+
+/**
+ * 👀 on a root message in a SLACK_CLIENT_REPORT_CHANNEL channel → copies the
+ * report into my private SLACK_BOT_PRIVATE_CHANNEL_CLIENT_REPORT channel, runs
+ * the everfit-api `client-report` skill (`investigate` mode) on the original
+ * thread, and posts the Vietnamese summary as a reply to that copy — a permanent
+ * record, nothing public. A hint I then write in the copy's thread continues the
+ * investigation (`handleClientReportFollowUp`). Failures are replies there too.
+ */
+async function handleClientReportReaction(event) {
+  const { channel, ts } = event.item;
+
+  const message = await fetchMessage(channel, ts);
+  if (!message) {
+    console.warn('[Slack] 👀 (client report) — could not fetch original message');
+    return;
+  }
+  if (message.ts !== ts) {
+    console.log(`[Slack] 👀 (client report) on thread reply — skipping (reacted ts=${ts}, root ts=${message.ts})`);
+    return;
+  }
+
+  const key = `${channel}:${ts}`;
+  if (clientReportsInFlight.has(key)) {
+    console.log(`[ClientReport] ${key} already under investigation — ignoring duplicate 👀`);
+    return;
+  }
+
+  // The skill only accepts `<workspace>.slack.com/archives/...` permalinks.
+  const threadLink = buildThreadLink(channel, ts);
+  if (!threadLink) {
+    await preview('⏭️ *Client report skipped*\n`SLACK_WORKSPACE is not set — cannot build the thread link the skill needs`');
+    return;
+  }
+  const privateChannel = clientReportPrivateChannel();
+  if (!privateChannel) {
+    await preview('⏭️ *Client report skipped*\n`SLACK_BOT_PRIVATE_CHANNEL_CLIENT_REPORT is not set — nowhere to post the result`');
+    return;
+  }
+
+  clientReportsInFlight.add(key);
+  try {
+    const author = message.user ? ` · posted by <@${message.user}>` : '';
+    const copyTs = await postToChannel(
+      privateChannel,
+      `${CLIENT_REPORT_COPY_HEADER} — <${threadLink}|original thread>${author}\n\n${message.text || ''}`
+    );
+    if (!copyTs) {
+      await preview(`⚠️ *Client report failed*\n\`couldn't copy the message into SLACK_BOT_PRIVATE_CHANNEL_CLIENT_REPORT\`\n<${threadLink}|Go to thread>`);
+      return;
+    }
+
+    console.log(`[ClientReport] investigating ${threadLink}`);
+    const statusTs = await postToChannel(privateChannel, CLIENT_REPORT_START_TEXT, { threadTs: copyTs });
+    const result = await runClientReport(threadLink, { model: clientReportModel() });
+    await clearClientReportStatus(privateChannel, statusTs);
+    await postClientReportResult(privateChannel, copyTs, result);
+  } finally {
+    clientReportsInFlight.delete(key);
+  }
+}
+
+/**
+ * A reply of mine inside a copied client report in SLACK_BOT_PRIVATE_CHANNEL_CLIENT_REPORT
+ * is a hint: the investigation resumes in the same claude session (its id is read
+ * back from the bot's earlier replies, so it survives a restart) and the new
+ * summary is posted in the thread. With no session on record it re-runs on the
+ * original thread with the hint as extra symptom text.
+ */
+async function handleClientReportFollowUp(event) {
+  if (event.user !== process.env.MY_SLACK_USER_ID) return;
+  if (event.subtype || event.bot_id) return;
+  // Thread replies only — a top-level post in the channel is just a note.
+  if (!event.thread_ts || event.thread_ts === event.ts) return;
+  const hint = (event.text || '').trim();
+  if (!hint) return;
+
+  const channel = event.channel;
+  const threadTs = event.thread_ts;
+
+  const messages = await fetchThreadMessages(channel, threadTs);
+  const root = messages[0];
+  if (!CLIENT_REPORT_COPY_RE.test(root?.text || '')) return;
+
+  const key = `${channel}:${threadTs}`;
+  if (clientReportsInFlight.has(key)) {
+    await postToChannel(channel, '⏳ Still investigating — send your hint again once the summary lands.', { threadTs });
+    return;
+  }
+
+  const originalLink = root.text.match(/https:\/\/[^\s|>]+\/archives\/[^\s|>]+/)?.[0];
+  const sessionId = extractSessionId(messages);
+  if (!originalLink && !sessionId) {
+    await postToChannel(channel, '⚠️ Couldn\'t find the original thread or an earlier session in this thread — react 👀 on the report again.', { threadTs });
+    return;
+  }
+
+  clientReportsInFlight.add(key);
+  try {
+    console.log(`[ClientReport] follow-up in ${key} (${sessionId ? `session ${sessionId}` : 'no session — fresh run'})`);
+    const statusTs = await postToChannel(channel, CLIENT_REPORT_CONTINUE_TEXT, { threadTs });
+    const result = await runClientReport(originalLink, {
+      model: clientReportModel(),
+      hint,
+      resumeSessionId: sessionId || undefined,
+    });
+    await clearClientReportStatus(channel, statusTs);
+    await postClientReportResult(channel, threadTs, result);
+  } finally {
+    clientReportsInFlight.delete(key);
+  }
+}
+
+/**
+ * Deletes the "Starting…" status reply once the run is over — like the PR
+ * review's "Starting code review" cleanup, so it never lingers next to the
+ * result. Done for failures too: the failure reply follows it. Best-effort
+ * (deleteMessage never throws); a no-op when the status post itself failed.
+ */
+async function clearClientReportStatus(channel, statusTs) {
+  if (!statusTs) return;
+  await deleteMessage(channel, statusTs, { ignoreDryRun: true });
+}
+
+/** `--model` for client-report runs: CLIENT_REPORT_MODEL, else the cheap model. */
+function clientReportModel() {
+  return process.env.CLIENT_REPORT_MODEL || TEAMMATE_REVIEW_MODEL;
+}
+
+/**
+ * Posts a client-report run's outcome as a reply in the copied report's thread:
+ * the Vietnamese summary (or a fallback notice) + the session footer + the hint
+ * tip, or the error.
+ */
+async function postClientReportResult(channel, threadTs, result) {
+  if (!result.ok) {
+    const text = `⚠️ *Client report failed*\n\`${result.error}\`\n${CLIENT_REPORT_HINT_TIP}`;
+    await postToChannel(channel, text, { threadTs, blocks: clientReportStopBlocks(text) });
+    return;
+  }
+  const body = result.summary
+    || '✅ Đã chạy xong client-report nhưng không có tóm tắt — xem ghi chú trong `ai-agents-output/client-reports-checking/` của repo everfit-api.';
+  const text = `${body}\n\n${sessionLine(result.sessionId)}\n${CLIENT_REPORT_HINT_TIP}`;
+  await postToChannel(channel, text, { threadTs, blocks: clientReportStopBlocks(text) });
+}
+
+/**
+ * Block Kit body for a client-report result: the text plus a `Stop & delete`
+ * button that wipes the whole thread and the note the skill saved.
+ */
+function clientReportStopBlocks(text) {
+  return [
+    { type: 'section', text: { type: 'mrkdwn', text } },
+    {
+      type: 'actions',
+      elements: [{
+        type: 'button',
+        action_id: CLIENT_REPORT_STOP_ACTION,
+        text: { type: 'plain_text', text: '🛑 Stop & delete', emoji: true },
+        value: 'stop',
+        style: 'danger',
+        confirm: {
+          title: { type: 'plain_text', text: 'Stop this report?' },
+          text: { type: 'mrkdwn', text: 'Deletes this whole thread and the saved note in everfit-api.' },
+          confirm: { type: 'plain_text', text: 'Delete' },
+          deny: { type: 'plain_text', text: 'Keep' },
+        },
+      }],
+    },
+  ];
+}
+
+/**
+ * A `🛑 Stop & delete` click: deletes the saved note file(s) the thread
+ * mentions, then every message of the thread (replies, then the copied root).
+ * Owner-only; refused while an investigation is still running in the thread.
+ */
+async function handleClientReportStopClick(payload) {
+  const userId = payload.user?.id;
+  const channel = payload.channel?.id;
+  const threadTs = payload.message?.thread_ts || payload.message?.ts;
+  if (!channel || !threadTs) {
+    console.warn('[ClientReport stop] incomplete interaction payload — ignoring');
+    return;
+  }
+  if (userId !== process.env.MY_SLACK_USER_ID) {
+    await respondEphemeral(payload.response_url, `Only <@${process.env.MY_SLACK_USER_ID}> can stop a client report.`);
+    return;
+  }
+  if (channel !== clientReportPrivateChannel()) return;
+  if (clientReportsInFlight.has(`${channel}:${threadTs}`)) {
+    await respondEphemeral(payload.response_url, '⏳ Still investigating — try again once the summary lands.');
+    return;
+  }
+
+  const messages = await fetchThreadMessages(channel, threadTs);
+  if (!CLIENT_REPORT_COPY_RE.test(messages[0]?.text || '')) return;
+
+  const notes = extractNotePaths(messages);
+  const noteResults = notes.map(note => ({ note, ...deleteClientReportNote(note) }));
+  const { deleted, failed } = await deleteThread(channel, threadTs);
+  console.log(`[ClientReport stop] ${channel}:${threadTs} — ${deleted} message(s) deleted, ${failed} failed, notes: ${notes.join(', ') || 'none'}`);
+  for (const r of noteResults.filter(n => !n.ok)) console.error(`[ClientReport stop] note not deleted: ${r.note} (${r.error})`);
 }
 
 /**
@@ -1172,6 +1426,8 @@ app.post('/slack/interactive', async (req, res) => {
     await handleReviewCancelClick(payload, action);
   } else if (action?.action_id === REVIEW_ACK_ACTION) {
     await handleReviewAckClick(payload, action);
+  } else if (action?.action_id === CLIENT_REPORT_STOP_ACTION) {
+    await handleClientReportStopClick(payload);
   }
 });
 

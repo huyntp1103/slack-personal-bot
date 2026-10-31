@@ -6,23 +6,26 @@ const mockReplies = jest.fn();
 const mockReactionsAdd = jest.fn();
 const mockSearchMessages = jest.fn();
 const mockChatDelete = jest.fn();
+const mockUserChatDelete = jest.fn();
+let mockClientCount = 0; // 1st WebClient is the bot's, 2nd the user-token one
 
 jest.mock('@slack/web-api', () => ({
   WebClient: jest.fn().mockImplementation(() => ({
-    chat: { postMessage: mockPostMessage, delete: mockChatDelete },
+    chat: { postMessage: mockPostMessage, delete: ++mockClientCount === 2 ? mockUserChatDelete : mockChatDelete },
     conversations: { history: mockHistory, replies: mockReplies },
     reactions: { add: mockReactionsAdd },
     search: { messages: mockSearchMessages },
   })),
 }));
 
-const { replyToThread, preview, reactToMessage, deleteMessage, deleteStartingReviewMessages, clearChannelHistory, fetchMessage, fetchThreadReply, searchMyMessages, respondEphemeral, replaceOriginal } = require('../src/slack');
+const { replyToThread, preview, reactToMessage, deleteMessage, deleteStartingReviewMessages, clearChannelHistory, fetchMessage, fetchThreadReply, searchMyMessages, respondEphemeral, postToChannel, fetchThreadMessages, replaceOriginal, deleteThread } = require('../src/slack');
 
 beforeEach(() => {
   jest.clearAllMocks();
   mockPostMessage.mockResolvedValue({ ts: '1778214715.999999' });
   mockReactionsAdd.mockResolvedValue({});
   mockChatDelete.mockResolvedValue({});
+  mockUserChatDelete.mockResolvedValue({});
   mockReplies.mockResolvedValue({ messages: [] });
   process.env.SLACK_BOT_PRIVATE_CHANNEL_REVIEW_CODE = 'C_PREVIEW';
   delete process.env.DRY_RUN;
@@ -199,6 +202,16 @@ describe('deleteMessage', () => {
     const previewText = mockPostMessage.mock.calls[0][0].text;
     expect(previewText).toContain('C0APHQYK456');
     expect(previewText).toContain('1778214715.118289');
+    expect(result).toEqual({ ok: true });
+  });
+
+  test('ignoreDryRun deletes for real even under DRY_RUN, with no preview', async () => {
+    process.env.DRY_RUN = 'true';
+
+    const result = await deleteMessage('CPRIVATE', '1.5', { ignoreDryRun: true });
+
+    expect(mockChatDelete).toHaveBeenCalledWith({ channel: 'CPRIVATE', ts: '1.5' });
+    expect(mockPostMessage).not.toHaveBeenCalled();
     expect(result).toEqual({ ok: true });
   });
 
@@ -623,5 +636,97 @@ describe('clearChannelHistory', () => {
   test('a history failure deletes nothing', async () => {
     mockHistory.mockRejectedValue(new Error('boom'));
     expect(await clearChannelHistory('C_PREVIEW', null)).toEqual({ deleted: 0, failed: 0 });
+  });
+});
+
+describe('postToChannel', () => {
+  test('posts a real message (even under DRY_RUN) and returns its ts', async () => {
+    process.env.DRY_RUN = 'true';
+    mockPostMessage.mockResolvedValue({ ts: '1.5' });
+
+    const ts = await postToChannel('C1', 'hello');
+
+    expect(mockPostMessage).toHaveBeenCalledTimes(1);
+    expect(mockPostMessage).toHaveBeenCalledWith({ channel: 'C1', text: 'hello' });
+    expect(ts).toBe('1.5');
+  });
+
+  test('replies in a thread when threadTs is given', async () => {
+    await postToChannel('C1', 'hi', { threadTs: '1.2' });
+    expect(mockPostMessage).toHaveBeenCalledWith({ channel: 'C1', text: 'hi', thread_ts: '1.2' });
+  });
+
+  test('returns null when Slack answers without a ts', async () => {
+    mockPostMessage.mockResolvedValue({});
+    expect(await postToChannel('C1', 'hi')).toBeNull();
+  });
+
+  test('returns null without throwing when Slack rejects it', async () => {
+    mockPostMessage.mockRejectedValue(new Error('channel_not_found'));
+    await expect(postToChannel('C1', 'hi')).resolves.toBeNull();
+  });
+});
+
+describe('fetchThreadMessages', () => {
+  test('returns the thread, root first', async () => {
+    mockReplies.mockResolvedValue({ messages: [{ ts: '1.0' }, { ts: '1.1' }] });
+
+    expect(await fetchThreadMessages('C1', '1.0')).toEqual([{ ts: '1.0' }, { ts: '1.1' }]);
+    expect(mockReplies).toHaveBeenCalledWith({ channel: 'C1', ts: '1.0', limit: 1000 });
+  });
+
+  test('empty when the response has no messages', async () => {
+    mockReplies.mockResolvedValue({});
+    expect(await fetchThreadMessages('C1', '1.0')).toEqual([]);
+  });
+
+  test('empty without throwing when the call fails', async () => {
+    mockReplies.mockRejectedValue(new Error('thread_not_found'));
+    await expect(fetchThreadMessages('C1', '1.0')).resolves.toEqual([]);
+  });
+});
+
+describe('postToChannel — blocks', () => {
+  test('passes Block Kit blocks through with the text as fallback', async () => {
+    const blocks = [{ type: 'section', text: { type: 'mrkdwn', text: 'hi' } }];
+    await postToChannel('CPRIVATE', 'hi', { threadTs: '1.1', blocks });
+    expect(mockPostMessage).toHaveBeenCalledWith({ channel: 'CPRIVATE', text: 'hi', blocks, thread_ts: '1.1' });
+  });
+});
+
+describe('deleteThread', () => {
+  const ROOT = '1800.000001';
+
+  test('deletes replies first and the root last; the bot token for bot messages, the user token for mine', async () => {
+    mockReplies.mockResolvedValue({ messages: [
+      { ts: ROOT, bot_id: 'B1' },
+      { ts: '1800.000002', bot_id: 'B1' },
+      { ts: '1800.000010', user: 'U093ZDNQJF3' },
+    ] });
+    process.env.DRY_RUN = 'true'; // must not matter
+
+    expect(await deleteThread('CPRIVATE', ROOT)).toEqual({ deleted: 3, failed: 0 });
+    expect(mockChatDelete.mock.calls).toEqual([
+      [{ channel: 'CPRIVATE', ts: '1800.000002' }],
+      [{ channel: 'CPRIVATE', ts: ROOT }],
+    ]);
+    expect(mockUserChatDelete.mock.calls).toEqual([[{ channel: 'CPRIVATE', ts: '1800.000010' }]]);
+  });
+
+  test('counts a refused delete instead of throwing, and keeps going', async () => {
+    mockReplies.mockResolvedValue({ messages: [
+      { ts: ROOT, bot_id: 'B1' },
+      { ts: '1800.000010', user: 'U093ZDNQJF3' },
+    ] });
+    mockUserChatDelete.mockRejectedValue(Object.assign(new Error('x'), { data: { error: 'cant_delete_message' } }));
+
+    expect(await deleteThread('CPRIVATE', ROOT)).toEqual({ deleted: 1, failed: 1 });
+    expect(mockChatDelete).toHaveBeenCalledWith({ channel: 'CPRIVATE', ts: ROOT });
+  });
+
+  test('still tries the root when the thread could not be fetched', async () => {
+    mockReplies.mockRejectedValue(new Error('boom'));
+    expect(await deleteThread('CPRIVATE', ROOT)).toEqual({ deleted: 1, failed: 0 });
+    expect(mockChatDelete).toHaveBeenCalledWith({ channel: 'CPRIVATE', ts: ROOT });
   });
 });

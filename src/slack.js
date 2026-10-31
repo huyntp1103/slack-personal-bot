@@ -56,6 +56,50 @@ async function replyToThread(channel, ts, text, opts = {}) {
 }
 
 /**
+ * Posts a plain message (optionally as a thread reply) and returns its ts. A
+ * real post — unlike `replyToThread` it ignores DRY_RUN and emits no preview —
+ * meant for my own private channels, where the message *is* the output.
+ * Never throws.
+ *
+ * @param {string} channel
+ * @param {string} text
+ * @param {{threadTs?: string, blocks?: object[]}} [opts] - `blocks` (Block Kit)
+ *   renders instead of `text`, which stays as the notification fallback
+ * @returns {Promise<string|null>} the new message's ts, null when the post failed
+ */
+async function postToChannel(channel, text, { threadTs, blocks } = {}) {
+  try {
+    const res = await slack.chat.postMessage({
+      channel,
+      text,
+      ...(blocks ? { blocks } : {}),
+      ...(threadTs ? { thread_ts: threadTs } : {}),
+    });
+    return res?.ts ?? null;
+  } catch (err) {
+    console.log(`[Slack] postToChannel(${channel}) failed:`, err.message);
+    return null;
+  }
+}
+
+/**
+ * All messages of a thread, root first (`conversations.replies`).
+ *
+ * @param {string} channel
+ * @param {string} threadTs - the root message's ts
+ * @returns {Promise<object[]>} empty when the call failed
+ */
+async function fetchThreadMessages(channel, threadTs) {
+  try {
+    const res = await slack.conversations.replies({ channel, ts: threadTs, limit: 1000 });
+    return res.messages || [];
+  } catch (err) {
+    console.log(`[Slack] fetchThreadMessages(${channel}, ${threadTs}) failed:`, err.message);
+    return [];
+  }
+}
+
+/**
  * Fetches a single message by channel + timestamp.
  * Requires channels:history scope.
  *
@@ -254,10 +298,12 @@ async function clearChannelHistory(channel, day) {
  *
  * @param {string} channel
  * @param {string} ts - message timestamp in dot format
+ * @param {{ignoreDryRun?: boolean}} [opts] - delete for real even under DRY_RUN,
+ *   for my own private channels where `postToChannel` also posts for real
  * @returns {Promise<{ok: boolean, error?: string}>}
  */
-async function deleteMessage(channel, ts) {
-  if (process.env.DRY_RUN === 'true') {
+async function deleteMessage(channel, ts, { ignoreDryRun = false } = {}) {
+  if (process.env.DRY_RUN === 'true' && !ignoreDryRun) {
     await preview(`👉 *Please delete this message*\nChannel: \`${channel}\` Thread: \`${ts}\``);
     return { ok: true };
   }
@@ -270,6 +316,37 @@ async function deleteMessage(channel, ts) {
     console.log(`[Slack] deleteMessage(${channel}, ${ts}) failed:`, err.message);
     return { ok: false, error: err.data?.error || err.message };
   }
+}
+
+/**
+ * Deletes a whole thread — every reply, then the root — for real (ignores
+ * DRY_RUN; meant for my own private channels). The bot's own messages go
+ * through the bot token; anyone else's (my hints) need the user token, which
+ * only works with the `chat:write` user scope. Best-effort: a message that
+ * can't be deleted is counted, not thrown.
+ *
+ * @param {string} channel
+ * @param {string} threadTs - the root message's ts
+ * @returns {Promise<{deleted: number, failed: number}>}
+ */
+async function deleteThread(channel, threadTs) {
+  const messages = await fetchThreadMessages(channel, threadTs);
+  // Root last, so a half-finished sweep still leaves a thread to retry from.
+  const ordered = [...messages.filter(m => m.ts !== threadTs), ...messages.filter(m => m.ts === threadTs)];
+  if (!ordered.length) ordered.push({ ts: threadTs, bot_id: 'unknown' });
+
+  let deleted = 0;
+  let failed = 0;
+  for (const m of ordered) {
+    try {
+      await (m.bot_id ? slack : userClient).chat.delete({ channel, ts: m.ts });
+      deleted++;
+    } catch (err) {
+      failed++;
+      console.log(`[Slack] deleteThread(${channel}) couldn't delete ${m.ts}:`, err.data?.error || err.message);
+    }
+  }
+  return { deleted, failed };
 }
 
 /**
@@ -382,8 +459,11 @@ module.exports = {
   deleteMessage,
   clearChannelHistory,
   deleteStartingReviewMessages,
+  deleteThread,
   searchMyMessages,
   buildThreadLink,
   respondEphemeral,
+  postToChannel,
+  fetchThreadMessages,
   replaceOriginal,
 };

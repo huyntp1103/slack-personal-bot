@@ -13,12 +13,15 @@ jest.mock('../src/slack', () => ({
   searchMyMessages: jest.fn(),
   buildThreadLink: jest.fn(),
   respondEphemeral: jest.fn(),
+  postToChannel: jest.fn(),
+  fetchThreadMessages: jest.fn(),
   replaceOriginal: jest.fn(),
   reactToMessage: jest.fn(),
   deleteMessage: jest.fn(),
   fetchThreadReply: jest.fn(),
   deleteStartingReviewMessages: jest.fn(),
   clearChannelHistory: jest.fn(),
+  deleteThread: jest.fn(),
 }));
 jest.mock('../src/github', () => ({
   fetchPrData: jest.fn(),
@@ -26,20 +29,30 @@ jest.mock('../src/github', () => ({
   fetchPrCommits: jest.fn(),
   approvePr: jest.fn(),
 }));
+jest.mock('../src/clientReport', () => ({
+  ...jest.requireActual('../src/clientReport'),
+  runClientReport: jest.fn(),
+  deleteClientReportNote: jest.fn(),
+}));
 jest.mock('../src/review', () => ({
   runPrReview: jest.fn(),
   reviewSkipReason: jest.fn(),
   cancelReview: jest.fn(),
 }));
 
-const { clearChannelHistory } = require('../src/slack');
+const { clearChannelHistory, deleteThread } = require('../src/slack');
+const { deleteClientReportNote } = require('../src/clientReport');
 const { transitionIssue, addComment, getIssue, getIssueSummary } = require('../src/jira');
 const { fetchMessage, searchMyMessages, preview, replyToThread, buildThreadLink, respondEphemeral, replaceOriginal, reactToMessage, deleteMessage, fetchThreadReply, deleteStartingReviewMessages } = require('../src/slack');
 const { fetchPrData, fetchPrTitle, fetchPrCommits, approvePr } = require('../src/github');
 const { runPrReview, reviewSkipReason, cancelReview } = require('../src/review');
+const { runClientReport } = require('../src/clientReport');
+const { postToChannel, fetchThreadMessages } = require('../src/slack');
 
 process.env.MY_SLACK_USER_ID = 'U093ZDNQJF3';
 process.env.SLACK_REVIEW_CODE_CHANNEL = 'C05F65TBB9P';
+process.env.SLACK_CLIENT_REPORT_CHANNEL = 'C03H5DCAZ45,C064GEV0D6Z';
+process.env.SLACK_BOT_PRIVATE_CHANNEL_CLIENT_REPORT = 'CPRIVATE';
 process.env.JIRA_HOST = 'https://everfit.atlassian.net/';
 process.env.ID_IN_REVIEW = '41';
 process.env.ID_QA_READY = '51';
@@ -89,6 +102,8 @@ beforeEach(() => {
   replaceOriginal.mockResolvedValue(true);
   reactToMessage.mockResolvedValue({ ok: true });
   deleteStartingReviewMessages.mockResolvedValue(0);
+  postToChannel.mockResolvedValue('1800.000001');
+  fetchThreadMessages.mockResolvedValue([]);
 });
 
 // ─── url_verification ─────────────────────────────────────────────────────────
@@ -3097,5 +3112,511 @@ describe('SLACK_REVIEW_CODE_CHANNEL with several channels', () => {
     await request(app).post('/slack/events').send(eyesPayload(inChannel(SECOND)));
     await new Promise(resolve => setTimeout(resolve, 30));
     expect(runPrReview).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ─── 👀 in a client-report channel → copy to private channel + investigate ─────
+
+const SESSION = '0b0f3c1e-5d2a-4a7e-9c11-2f6f1a9d8e77';
+const SESSION_LINE = `🧵 session \`${SESSION}\``;
+const HINT_TIP = '💬 _Reply in this thread with a hint to keep investigating._';
+
+describe('handleClientReportReaction (👀 in SLACK_CLIENT_REPORT_CHANNEL)', () => {
+  const FIRST = 'C03H5DCAZ45';
+  const SECOND = 'C064GEV0D6Z';
+  const ROOT_TS = '1774413157.652859';
+  const COPY_TS = '1800.000001';
+  const LINK = 'https://everfitt.slack.com/archives/C03H5DCAZ45/p1774413157652859';
+  const eyes = (channel = FIRST, overrides = {}) => eyesPayload({ item: { type: 'message', channel, ts: ROOT_TS }, ...overrides });
+
+  beforeEach(() => {
+    fetchMessage.mockResolvedValue({ ts: ROOT_TS, text: 'client cannot see workouts', user: 'UCLIENT' });
+    buildThreadLink.mockReturnValue(LINK);
+    runClientReport.mockResolvedValue({ ok: true, summary: '*Báo cáo khách hàng — x*', sessionId: SESSION });
+  });
+
+  test.each([FIRST, SECOND])('copies the report from %s into the private channel, then replies there with the summary', async channel => {
+    await request(app).post('/slack/events').send(eyes(channel));
+    await waitUntil(() => postToChannel.mock.calls.length === 3);
+
+    expect(buildThreadLink).toHaveBeenCalledWith(channel, ROOT_TS);
+    expect(postToChannel.mock.calls[0]).toEqual([
+      'CPRIVATE',
+      `📋 *Client report* — <${LINK}|original thread> · posted by <@UCLIENT>\n\nclient cannot see workouts`,
+    ]);
+    expect(runClientReport).toHaveBeenCalledWith(LINK, { model: 'claude-haiku-5-5' });
+    expect(postToChannel.mock.calls[1]).toEqual(['CPRIVATE', 'Starting client report investigation. Will post results here shortly.', { threadTs: COPY_TS }]);
+    expect(postToChannel.mock.calls[2]).toEqual([
+      'CPRIVATE',
+      `*Báo cáo khách hàng — x*\n\n${SESSION_LINE}\n${HINT_TIP}`,
+      { threadTs: COPY_TS, blocks: expect.any(Array) },
+    ]);
+  });
+
+  test('deletes the "Starting…" status once the run is done — before the result is posted', async () => {
+    postToChannel.mockResolvedValueOnce(COPY_TS).mockResolvedValueOnce('1800.000002').mockResolvedValue('1800.000003');
+    await request(app).post('/slack/events').send(eyes());
+    await waitUntil(() => postToChannel.mock.calls.length === 3);
+
+    expect(deleteMessage).toHaveBeenCalledTimes(1);
+    expect(deleteMessage).toHaveBeenCalledWith('CPRIVATE', '1800.000002', { ignoreDryRun: true });
+    expect(deleteMessage.mock.invocationCallOrder[0]).toBeLessThan(postToChannel.mock.invocationCallOrder[2]);
+  });
+
+  test('the status is removed after a failed run too (the failure reply follows it)', async () => {
+    runClientReport.mockResolvedValue({ ok: false, error: 'boom' });
+    await request(app).post('/slack/events').send(eyes());
+    await waitUntil(() => postToChannel.mock.calls.length === 3);
+
+    expect(deleteMessage).toHaveBeenCalledWith('CPRIVATE', COPY_TS, { ignoreDryRun: true });
+  });
+
+  test('the status stays untouched while the run is still going', async () => {
+    let finish;
+    runClientReport.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    await request(app).post('/slack/events').send(eyes());
+    await waitUntil(() => runClientReport.mock.calls.length === 1);
+
+    expect(deleteMessage).not.toHaveBeenCalled();
+    finish({ ok: true, summary: 'xong', sessionId: SESSION });
+    await waitUntil(() => deleteMessage.mock.calls.length === 1);
+  });
+
+  test('skips the delete when the status post itself failed, and still posts the result', async () => {
+    postToChannel.mockResolvedValueOnce(COPY_TS).mockResolvedValueOnce(null).mockResolvedValue('x');
+    await request(app).post('/slack/events').send(eyes());
+    await waitUntil(() => postToChannel.mock.calls.length === 3);
+
+    expect(deleteMessage).not.toHaveBeenCalled();
+  });
+
+  test('copies the message first — the investigation starts only after the copy exists', async () => {
+    let finish;
+    runClientReport.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    await request(app).post('/slack/events').send(eyes());
+    await waitUntil(() => runClientReport.mock.calls.length === 1);
+
+    expect(postToChannel).toHaveBeenCalledTimes(2); // the copy + the "Starting…" status
+    finish({ ok: true, summary: 'xong', sessionId: SESSION });
+    await waitUntil(() => postToChannel.mock.calls.length === 3);
+  });
+
+  test('omits the author when the message has none, and tolerates empty text', async () => {
+    fetchMessage.mockResolvedValue({ ts: ROOT_TS });
+    await request(app).post('/slack/events').send(eyes());
+    await waitUntil(() => postToChannel.mock.calls.length === 3);
+
+    expect(postToChannel.mock.calls[0][1]).toBe(`📋 *Client report* — <${LINK}|original thread>\n\n`);
+  });
+
+  test('uses CLIENT_REPORT_MODEL when set', async () => {
+    process.env.CLIENT_REPORT_MODEL = 'claude-sonnet-5-5';
+    try {
+      await request(app).post('/slack/events').send(eyes());
+      await waitUntil(() => runClientReport.mock.calls.length === 1);
+      expect(runClientReport).toHaveBeenCalledWith(LINK, { model: 'claude-sonnet-5-5' });
+    } finally {
+      delete process.env.CLIENT_REPORT_MODEL;
+    }
+  });
+
+  test('never reviews a PR, replies in the original thread, or touches Jira/GitHub', async () => {
+    await request(app).post('/slack/events').send(eyes());
+    await waitUntil(() => postToChannel.mock.calls.length === 3);
+
+    expect(runPrReview).not.toHaveBeenCalled();
+    expect(replyToThread).not.toHaveBeenCalled();
+    expect(transitionIssue).not.toHaveBeenCalled();
+    expect(approvePr).not.toHaveBeenCalled();
+    expect(preview).not.toHaveBeenCalled();
+  });
+
+  test('ignores 👀 from other users', async () => {
+    await request(app).post('/slack/events').send(eyes(FIRST, { user: 'UOTHER' }));
+    expect(runClientReport).not.toHaveBeenCalled();
+    expect(postToChannel).not.toHaveBeenCalled();
+  });
+
+  test('ignores a 👀 on a thread reply', async () => {
+    fetchMessage.mockResolvedValue({ ts: '1774413999.000000', text: 'nearest root' });
+    await request(app).post('/slack/events').send(eyes());
+    await waitUntil(() => fetchMessage.mock.calls.length === 1);
+    expect(runClientReport).not.toHaveBeenCalled();
+    expect(postToChannel).not.toHaveBeenCalled();
+  });
+
+  test('does nothing when the reacted message cannot be fetched', async () => {
+    fetchMessage.mockResolvedValue(null);
+    await request(app).post('/slack/events').send(eyes());
+    await waitUntil(() => fetchMessage.mock.calls.length === 1);
+    expect(runClientReport).not.toHaveBeenCalled();
+    expect(postToChannel).not.toHaveBeenCalled();
+  });
+
+  test('skips with a preview when SLACK_WORKSPACE is unset (no thread link to hand the skill)', async () => {
+    buildThreadLink.mockReturnValue(null);
+    await request(app).post('/slack/events').send(eyes());
+    await waitUntil(() => preview.mock.calls.length === 1);
+
+    expect(preview.mock.calls[0][0]).toContain('Client report skipped');
+    expect(runClientReport).not.toHaveBeenCalled();
+    expect(postToChannel).not.toHaveBeenCalled();
+  });
+
+  test('skips with a preview when the private channel is not configured', async () => {
+    delete process.env.SLACK_BOT_PRIVATE_CHANNEL_CLIENT_REPORT;
+    try {
+      await request(app).post('/slack/events').send(eyes());
+      await waitUntil(() => preview.mock.calls.length === 1);
+
+      expect(preview.mock.calls[0][0]).toBe('⏭️ *Client report skipped*\n`SLACK_BOT_PRIVATE_CHANNEL_CLIENT_REPORT is not set — nowhere to post the result`');
+      expect(runClientReport).not.toHaveBeenCalled();
+    } finally {
+      process.env.SLACK_BOT_PRIVATE_CHANNEL_CLIENT_REPORT = 'CPRIVATE';
+    }
+  });
+
+  test('previews a failure and does not investigate when the copy cannot be posted', async () => {
+    postToChannel.mockResolvedValue(null);
+    await request(app).post('/slack/events').send(eyes());
+    await waitUntil(() => preview.mock.calls.length === 1);
+
+    expect(preview).toHaveBeenCalledWith(
+      `⚠️ *Client report failed*\n\`couldn't copy the message into SLACK_BOT_PRIVATE_CHANNEL_CLIENT_REPORT\`\n<${LINK}|Go to thread>`
+    );
+    expect(runClientReport).not.toHaveBeenCalled();
+  });
+
+  test('a failed run is reported as a reply in the copy, not publicly', async () => {
+    runClientReport.mockResolvedValue({ ok: false, error: 'claude exited 1: boom' });
+    await request(app).post('/slack/events').send(eyes());
+    await waitUntil(() => postToChannel.mock.calls.length === 3);
+
+    expect(postToChannel.mock.calls[2]).toEqual([
+      'CPRIVATE',
+      `⚠️ *Client report failed*\n\`claude exited 1: boom\`\n${HINT_TIP}`,
+      { threadTs: COPY_TS, blocks: expect.any(Array) },
+    ]);
+    expect(replyToThread).not.toHaveBeenCalled();
+  });
+
+  test('falls back to a Vietnamese notice when the run produced no digest', async () => {
+    runClientReport.mockResolvedValue({ ok: true, summary: null, sessionId: SESSION });
+    await request(app).post('/slack/events').send(eyes());
+    await waitUntil(() => postToChannel.mock.calls.length === 3);
+
+    expect(postToChannel.mock.calls[2][1]).toBe(
+      `✅ Đã chạy xong client-report nhưng không có tóm tắt — xem ghi chú trong \`ai-agents-output/client-reports-checking/\` của repo everfit-api.\n\n${SESSION_LINE}\n${HINT_TIP}`
+    );
+  });
+
+  test('a second 👀 while the first is running is ignored; it can run again afterwards', async () => {
+    let finish;
+    runClientReport.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+
+    await request(app).post('/slack/events').send(eyes());
+    await waitUntil(() => runClientReport.mock.calls.length === 1);
+    await request(app).post('/slack/events').send(eyes());
+    await waitUntil(() => fetchMessage.mock.calls.length === 2);
+    expect(runClientReport).toHaveBeenCalledTimes(1);
+    expect(postToChannel).toHaveBeenCalledTimes(2);
+
+    finish({ ok: true, summary: 'xong', sessionId: SESSION });
+    await waitUntil(() => postToChannel.mock.calls.length === 3);
+
+    await request(app).post('/slack/events').send(eyes());
+    await waitUntil(() => runClientReport.mock.calls.length === 2);
+  });
+
+  test('a 👀 in a code-review channel is still the PR review flow', async () => {
+    reviewSkipReason.mockReturnValue(null);
+    replyToThread.mockResolvedValue(undefined);
+    runPrReview.mockResolvedValue({ ok: true, commentUrl: null, counts: null, summary: null });
+    fetchMessage.mockResolvedValue({ ts: ROOT_TS, text: '<https://github.com/Everfit-io/everfit-api/pull/16391>' });
+    await request(app).post('/slack/events').send(eyes('C05F65TBB9P'));
+    await waitUntil(() => runPrReview.mock.calls.length === 1);
+    expect(runClientReport).not.toHaveBeenCalled();
+  });
+
+  test('a channel in neither list is ignored', async () => {
+    await request(app).post('/slack/events').send(eyes('COTHER'));
+    expect(fetchMessage).not.toHaveBeenCalled();
+    expect(runClientReport).not.toHaveBeenCalled();
+  });
+});
+
+// ─── hint in a copied client report's thread → continue the investigation ──────
+
+describe('handleClientReportFollowUp (reply in SLACK_BOT_PRIVATE_CHANNEL_CLIENT_REPORT)', () => {
+  const COPY_TS = '1800.000001';
+  const ORIGINAL = 'https://everfitt.slack.com/archives/C03H5DCAZ45/p1774413157652859';
+  const rootCopy = {
+    ts: COPY_TS,
+    text: `📋 *Client report* — <${ORIGINAL}|original thread> · posted by <@UCLIENT>\n\nclient cannot see workouts`,
+  };
+  const summaryReply = { ts: '1800.000002', bot_id: 'B1', text: `*Báo cáo*\n\n${SESSION_LINE}\n${HINT_TIP}` };
+  const hintEvent = (overrides = {}) => ({
+    type: 'event_callback',
+    event: {
+      type: 'message',
+      user: 'U093ZDNQJF3',
+      channel: 'CPRIVATE',
+      text: 'check the cdc consumer for program unassign',
+      ts: '1800.000010',
+      thread_ts: COPY_TS,
+      ...overrides,
+    },
+  });
+
+  beforeEach(() => {
+    fetchThreadMessages.mockResolvedValue([rootCopy, summaryReply, { ts: '1800.000010', text: 'a hint' }]);
+    runClientReport.mockResolvedValue({ ok: true, summary: '*Cập nhật*', sessionId: SESSION });
+  });
+
+  test('resumes the session found in the thread and replies with the new summary', async () => {
+    await request(app).post('/slack/events').send(hintEvent());
+    await waitUntil(() => postToChannel.mock.calls.length === 2);
+
+    expect(fetchThreadMessages).toHaveBeenCalledWith('CPRIVATE', COPY_TS);
+    expect(runClientReport).toHaveBeenCalledWith(ORIGINAL, {
+      model: 'claude-haiku-5-5',
+      hint: 'check the cdc consumer for program unassign',
+      resumeSessionId: SESSION,
+    });
+    expect(postToChannel).toHaveBeenCalledWith('CPRIVATE', 'Continuing the investigation with your hint. Will post results here shortly.', { threadTs: COPY_TS });
+    expect(deleteMessage).toHaveBeenCalledWith('CPRIVATE', COPY_TS, { ignoreDryRun: true });
+    expect(postToChannel).toHaveBeenCalledWith(
+      'CPRIVATE',
+      `*Cập nhật*\n\n${SESSION_LINE}\n${HINT_TIP}`,
+      { threadTs: COPY_TS, blocks: expect.any(Array) }
+    );
+  });
+
+  test('recognises the root and the session footer when Slack returns the emoji as :shortcodes:', async () => {
+    fetchThreadMessages.mockResolvedValue([
+      { ts: COPY_TS, text: rootCopy.text.replace('📋', ':clipboard:') },
+      { ts: '1800.000002', bot_id: 'B1', text: `*Báo cáo*\n\n:thread: session \`${SESSION}\`\n:speech_balloon: _Reply in this thread with a hint to keep investigating._` },
+    ]);
+    await request(app).post('/slack/events').send(hintEvent());
+    await waitUntil(() => runClientReport.mock.calls.length === 1);
+
+    expect(runClientReport).toHaveBeenCalledWith(ORIGINAL, expect.objectContaining({ resumeSessionId: SESSION }));
+  });
+
+  test('uses the most recent session when a thread holds several', async () => {
+    const newer = '11111111-2222-4333-8444-555555555555';
+    fetchThreadMessages.mockResolvedValue([rootCopy, summaryReply, { ts: '1800.000020', bot_id: 'B1', text: `x\n🧵 session \`${newer}\`` }]);
+    await request(app).post('/slack/events').send(hintEvent());
+    await waitUntil(() => runClientReport.mock.calls.length === 1);
+
+    expect(runClientReport.mock.calls[0][1].resumeSessionId).toBe(newer);
+  });
+
+  test('with no session on record it re-runs on the original thread with the hint', async () => {
+    fetchThreadMessages.mockResolvedValue([rootCopy]);
+    await request(app).post('/slack/events').send(hintEvent());
+    await waitUntil(() => runClientReport.mock.calls.length === 1);
+
+    expect(runClientReport).toHaveBeenCalledWith(ORIGINAL, {
+      model: 'claude-haiku-5-5',
+      hint: 'check the cdc consumer for program unassign',
+      resumeSessionId: undefined,
+    });
+  });
+
+  test('with neither a session nor an original link it says so and runs nothing', async () => {
+    fetchThreadMessages.mockResolvedValue([{ ts: COPY_TS, text: '📋 *Client report* — no link here' }]);
+    await request(app).post('/slack/events').send(hintEvent());
+    await waitUntil(() => postToChannel.mock.calls.length === 1);
+
+    expect(runClientReport).not.toHaveBeenCalled();
+    expect(deleteMessage).not.toHaveBeenCalled();
+    expect(postToChannel.mock.calls[0][1]).toContain("Couldn't find the original thread");
+  });
+
+  test('a failed continuation is reported in the thread', async () => {
+    runClientReport.mockResolvedValue({ ok: false, error: 'timed out' });
+    await request(app).post('/slack/events').send(hintEvent());
+    await waitUntil(() => postToChannel.mock.calls.length === 2);
+
+    expect(postToChannel.mock.calls[1][1]).toBe(`⚠️ *Client report failed*\n\`timed out\`\n${HINT_TIP}`);
+  });
+
+  test('a hint while an investigation is running gets a "still investigating" reply and starts nothing', async () => {
+    let finish;
+    runClientReport.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    await request(app).post('/slack/events').send(hintEvent());
+    await waitUntil(() => runClientReport.mock.calls.length === 1);
+
+    await request(app).post('/slack/events').send(hintEvent({ ts: '1800.000011' }));
+    await waitUntil(() => postToChannel.mock.calls.length === 2);
+    expect(postToChannel.mock.calls[1][1]).toBe('⏳ Still investigating — send your hint again once the summary lands.');
+    expect(runClientReport).toHaveBeenCalledTimes(1);
+
+    finish({ ok: true, summary: 'xong', sessionId: SESSION });
+    await waitUntil(() => postToChannel.mock.calls.length === 3);
+  });
+
+  test.each([
+    ['another user', { user: 'UOTHER' }],
+    ['a bot message', { bot_id: 'B1' }],
+    ['an edited/subtyped message', { subtype: 'message_changed' }],
+    ['a top-level post (no thread)', { thread_ts: undefined }],
+    ['the root itself', { thread_ts: '1800.000010' }],
+    ['an empty reply', { text: '   ' }],
+  ])('ignores %s', async (_label, overrides) => {
+    await request(app).post('/slack/events').send(hintEvent(overrides));
+    await new Promise(r => setTimeout(r, 30));
+    expect(fetchThreadMessages).not.toHaveBeenCalled();
+    expect(runClientReport).not.toHaveBeenCalled();
+  });
+
+  test('ignores a thread whose root is not a copied client report', async () => {
+    fetchThreadMessages.mockResolvedValue([{ ts: COPY_TS, text: 'some other message' }]);
+    await request(app).post('/slack/events').send(hintEvent());
+    await waitUntil(() => fetchThreadMessages.mock.calls.length === 1);
+
+    expect(runClientReport).not.toHaveBeenCalled();
+    expect(postToChannel).not.toHaveBeenCalled();
+  });
+
+  test('ignores a thread whose messages cannot be fetched', async () => {
+    fetchThreadMessages.mockResolvedValue([]);
+    await request(app).post('/slack/events').send(hintEvent());
+    await waitUntil(() => fetchThreadMessages.mock.calls.length === 1);
+
+    expect(runClientReport).not.toHaveBeenCalled();
+  });
+
+  test('messages in other channels never reach this flow', async () => {
+    await request(app).post('/slack/events').send(hintEvent({ channel: 'COTHER' }));
+    await new Promise(r => setTimeout(r, 30));
+    expect(fetchThreadMessages).not.toHaveBeenCalled();
+  });
+
+  test('does not run when the private channel is unset (the channel check cannot match undefined)', async () => {
+    delete process.env.SLACK_BOT_PRIVATE_CHANNEL_CLIENT_REPORT;
+    try {
+      await request(app).post('/slack/events').send(hintEvent({ channel: undefined }));
+      await new Promise(r => setTimeout(r, 30));
+      expect(fetchThreadMessages).not.toHaveBeenCalled();
+    } finally {
+      process.env.SLACK_BOT_PRIVATE_CHANNEL_CLIENT_REPORT = 'CPRIVATE';
+    }
+  });
+});
+
+
+describe('POST /slack/interactive — client report "Stop & delete" button', () => {
+  const COPY_TS = '1800.000001';
+  const NOTE = 'ai-agents-output/client-reports-checking/training/autoflow/2026-10-31-duplicate-workouts.md';
+  const rootCopy = { ts: COPY_TS, text: '📋 *Client report* — <https://everfitt.slack.com/archives/C03H5DCAZ45/p1|original thread>\n\nbody' };
+  const summary = { ts: '1800.000002', bot_id: 'B1', text: `*Báo cáo*\n*File đã lưu:* \`${NOTE}\`` };
+  const stopPayload = (overrides = {}) => ({
+    type: 'block_actions',
+    user: { id: 'U093ZDNQJF3' },
+    channel: { id: 'CPRIVATE' },
+    message: { ts: '1800.000002', thread_ts: COPY_TS },
+    response_url: 'https://hooks.slack.com/actions/T000/123/abc',
+    actions: [{ action_id: 'client_report_stop', value: 'stop' }],
+    ...overrides,
+  });
+
+  beforeEach(() => {
+    fetchThreadMessages.mockResolvedValue([rootCopy, summary]);
+    deleteThread.mockResolvedValue({ deleted: 2, failed: 0 });
+  });
+
+  test('result replies carry the button (first run)', async () => {
+    runClientReport.mockResolvedValue({ ok: true, summary: '*x*', sessionId: SESSION });
+    fetchMessage.mockResolvedValue({ ts: '1774413157.652859', text: 'hi', user: 'UCLIENT' });
+    buildThreadLink.mockReturnValue('https://everfitt.slack.com/archives/C03H5DCAZ45/p1774413157652859');
+    await request(app).post('/slack/events').send(eyesPayload({ item: { type: 'message', channel: 'C03H5DCAZ45', ts: '1774413157.652859' } }));
+    await waitUntil(() => postToChannel.mock.calls.length === 3);
+
+    const { blocks } = postToChannel.mock.calls[2][2];
+    expect(blocks[1].elements[0]).toMatchObject({ action_id: 'client_report_stop', style: 'danger', value: 'stop' });
+    expect(blocks[1].elements[0].text.text).toBe('🛑 Stop & delete');
+  });
+
+  test('deletes the saved note and the whole thread, without posting a preview', async () => {
+    deleteClientReportNote.mockReturnValue({ ok: true });
+    await postInteraction(stopPayload());
+    await waitUntil(() => deleteThread.mock.calls.length === 1);
+
+    expect(fetchThreadMessages).toHaveBeenCalledWith('CPRIVATE', COPY_TS);
+    expect(deleteClientReportNote).toHaveBeenCalledWith(NOTE);
+    expect(deleteThread).toHaveBeenCalledWith('CPRIVATE', COPY_TS);
+    expect(preview).not.toHaveBeenCalled();
+  });
+
+  test('a note that could not be deleted is logged, not previewed', async () => {
+    const err = jest.spyOn(console, 'error').mockImplementation(() => {});
+    deleteClientReportNote.mockReturnValue({ ok: false, error: 'EACCES' });
+    deleteThread.mockResolvedValue({ deleted: 1, failed: 1 });
+    await postInteraction(stopPayload());
+    await waitUntil(() => err.mock.calls.length === 1);
+
+    expect(err).toHaveBeenCalledWith(`[ClientReport stop] note not deleted: ${NOTE} (EACCES)`);
+    expect(preview).not.toHaveBeenCalled();
+    err.mockRestore();
+  });
+
+  test('a thread that mentions no note still gets deleted', async () => {
+    fetchThreadMessages.mockResolvedValue([rootCopy, { ts: '1800.000002', bot_id: 'B1', text: 'nothing saved' }]);
+    await postInteraction(stopPayload());
+    await waitUntil(() => deleteThread.mock.calls.length === 1);
+
+    expect(deleteThread).toHaveBeenCalledWith('CPRIVATE', COPY_TS);
+    expect(deleteClientReportNote).not.toHaveBeenCalled();
+    expect(preview).not.toHaveBeenCalled();
+  });
+
+  test('anyone but me is refused ephemerally and nothing is deleted', async () => {
+    await postInteraction(stopPayload({ user: { id: 'UOTHER' } }));
+    await waitUntil(() => respondEphemeral.mock.calls.length === 1);
+
+    expect(respondEphemeral).toHaveBeenCalledWith(expect.any(String), 'Only <@U093ZDNQJF3> can stop a client report.');
+    expect(deleteThread).not.toHaveBeenCalled();
+  });
+
+  test('a click outside the private channel is ignored', async () => {
+    await postInteraction(stopPayload({ channel: { id: 'COTHER' } }));
+    await new Promise(r => setTimeout(r, 50));
+    expect(deleteThread).not.toHaveBeenCalled();
+    expect(fetchThreadMessages).not.toHaveBeenCalled();
+  });
+
+  test('a thread whose root is not a copied report is left alone', async () => {
+    fetchThreadMessages.mockResolvedValue([{ ts: COPY_TS, text: 'just a note' }, summary]);
+    await postInteraction(stopPayload());
+    await waitUntil(() => fetchThreadMessages.mock.calls.length === 1);
+    await new Promise(r => setTimeout(r, 50));
+    expect(deleteThread).not.toHaveBeenCalled();
+  });
+
+  test('is refused while the thread is still being investigated', async () => {
+    let finish;
+    runClientReport.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    fetchThreadMessages.mockResolvedValue([rootCopy, summary, { ts: '1800.000010', text: 'hint' }]);
+    await request(app).post('/slack/events').send({
+      type: 'event_callback',
+      event: { type: 'message', user: 'U093ZDNQJF3', channel: 'CPRIVATE', text: 'hint', ts: '1800.000010', thread_ts: COPY_TS },
+    });
+    await waitUntil(() => runClientReport.mock.calls.length === 1);
+
+    await postInteraction(stopPayload());
+    await waitUntil(() => respondEphemeral.mock.calls.length === 1);
+    expect(respondEphemeral).toHaveBeenCalledWith(expect.any(String), '⏳ Still investigating — try again once the summary lands.');
+    expect(deleteThread).not.toHaveBeenCalled();
+
+    finish({ ok: true, summary: 's', sessionId: SESSION });
+    await waitUntil(() => postToChannel.mock.calls.length >= 2);
+  });
+
+  test('an incomplete payload is ignored', async () => {
+    await postInteraction(stopPayload({ channel: undefined }));
+    await new Promise(r => setTimeout(r, 50));
+    expect(deleteThread).not.toHaveBeenCalled();
   });
 });
