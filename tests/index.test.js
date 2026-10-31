@@ -34,6 +34,11 @@ jest.mock('../src/clientReport', () => ({
   runClientReport: jest.fn(),
   deleteClientReportNote: jest.fn(),
 }));
+jest.mock('../src/techBlog', () => ({
+  ...jest.requireActual('../src/techBlog'),
+  runTechBlogScan: jest.fn(),
+  runReadTechBlog: jest.fn(),
+}));
 jest.mock('../src/review', () => ({
   runPrReview: jest.fn(),
   reviewSkipReason: jest.fn(),
@@ -47,6 +52,7 @@ const { fetchMessage, searchMyMessages, preview, replyToThread, buildThreadLink,
 const { fetchPrData, fetchPrTitle, fetchPrCommits, approvePr } = require('../src/github');
 const { runPrReview, reviewSkipReason, cancelReview } = require('../src/review');
 const { runClientReport } = require('../src/clientReport');
+const { runTechBlogScan, runReadTechBlog } = require('../src/techBlog');
 const { postToChannel, fetchThreadMessages } = require('../src/slack');
 
 process.env.MY_SLACK_USER_ID = 'U093ZDNQJF3';
@@ -743,69 +749,99 @@ describe('POST /slack/commands — /tickets', () => {
   });
 });
 
-describe('POST /slack/commands — /clear-history', () => {
+describe('POST /slack/commands — /clear-message', () => {
   let fetchMock;
+  const PRIVATE_VARS = ['SLACK_BOT_PRIVATE_CHANNEL_REVIEW_CODE', 'SLACK_BOT_PRIVATE_CHANNEL_CLIENT_REPORT', 'SLACK_BOT_PRIVATE_CHANNEL_TECH_BLOG'];
+  let savedEnv;
 
-  const send = text =>
+  const send = (text, channel_id = 'C_REVIEW', user_id = 'U093ZDNQJF3') =>
     request(app)
       .post('/slack/commands')
       .type('form')
-      .send({ command: '/clear-history', text, user_id: 'U093ZDNQJF3', response_url: 'https://hooks.slack.com/x' });
+      .send({ command: '/clear-message', text, user_id, channel_id, response_url: 'https://hooks.slack.com/x' });
 
   beforeEach(() => {
+    savedEnv = Object.fromEntries(PRIVATE_VARS.map(k => [k, process.env[k]]));
     fetchMock = jest.fn().mockResolvedValue({ ok: true });
     global.fetch = fetchMock;
-    process.env.SLACK_BOT_PRIVATE_CHANNEL_REVIEW_CODE = 'C_PREVIEW';
+    process.env.SLACK_BOT_PRIVATE_CHANNEL_REVIEW_CODE = 'C_REVIEW';
+    process.env.SLACK_BOT_PRIVATE_CHANNEL_CLIENT_REPORT = 'C_CLIENT';
+    process.env.SLACK_BOT_PRIVATE_CHANNEL_TECH_BLOG = 'C_TECH';
     clearChannelHistory.mockResolvedValue({ deleted: 3, failed: 0 });
+    postToChannel.mockResolvedValue('1.1');
   });
 
   afterEach(() => {
     delete global.fetch;
+    for (const [k, v] of Object.entries(savedEnv)) {
+      if (v === undefined) delete process.env[k]; else process.env[k] = v;
+    }
   });
 
   const lastText = () => JSON.parse(fetchMock.mock.calls.at(-1)[1].body).text;
 
-  test('a date clears that day', async () => {
+  test('a date clears that day in the channel it is typed in and posts the result there', async () => {
     await send('2026-05-10');
-    await waitUntil(() => fetchMock.mock.calls.length > 0);
-    expect(clearChannelHistory).toHaveBeenCalledWith('C_PREVIEW', '2026-05-10');
-    expect(lastText()).toBe('🧹 Cleared 3 messages from the preview channel (2026-05-10).');
+    await waitUntil(() => postToChannel.mock.calls.length > 0);
+    expect(clearChannelHistory).toHaveBeenCalledWith('C_REVIEW', '2026-05-10');
+    expect(postToChannel).toHaveBeenCalledWith('C_REVIEW', '🧹 Cleared 3 messages from this channel (2026-05-10).');
+  });
+
+  test.each([['C_REVIEW'], ['C_CLIENT'], ['C_TECH']])('works in private channel %s', async channel => {
+    await send('all', channel);
+    await waitUntil(() => postToChannel.mock.calls.length > 0);
+    expect(clearChannelHistory).toHaveBeenCalledWith(channel, null);
+    expect(postToChannel.mock.calls[0][0]).toBe(channel);
   });
 
   test('no argument defaults to today', async () => {
     await send('');
-    await waitUntil(() => fetchMock.mock.calls.length > 0);
-    expect(clearChannelHistory).toHaveBeenCalledWith('C_PREVIEW', expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/));
+    await waitUntil(() => clearChannelHistory.mock.calls.length > 0);
+    expect(clearChannelHistory).toHaveBeenCalledWith('C_REVIEW', expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/));
   });
 
-  test('"all" clears everything, case-insensitively, and reports failures', async () => {
+  test('"all" clears everything, case-insensitively, and reports failures and a single message', async () => {
     clearChannelHistory.mockResolvedValue({ deleted: 1, failed: 2 });
     await send('ALL');
+    await waitUntil(() => postToChannel.mock.calls.length > 0);
+    expect(clearChannelHistory).toHaveBeenCalledWith('C_REVIEW', null);
+    expect(postToChannel).toHaveBeenCalledWith('C_REVIEW', '🧹 Cleared 1 message from this channel (all history) — 2 could not be deleted.');
+  });
+
+  test('falls back to an ephemeral result when the channel post fails', async () => {
+    postToChannel.mockResolvedValue(null);
+    await send('all');
     await waitUntil(() => fetchMock.mock.calls.length > 0);
-    expect(clearChannelHistory).toHaveBeenCalledWith('C_PREVIEW', null);
-    expect(lastText()).toBe('🧹 Cleared 1 message from the preview channel (all history) — 2 could not be deleted.');
+    expect(lastText()).toBe('🧹 Cleared 3 messages from this channel (all history).');
   });
 
   test('rejects an invalid date without deleting anything', async () => {
     await send('yesterday');
     await waitUntil(() => fetchMock.mock.calls.length > 0);
     expect(clearChannelHistory).not.toHaveBeenCalled();
+    expect(postToChannel).not.toHaveBeenCalled();
     expect(lastText()).toBe('❌ Invalid date `yesterday` — use YYYY-MM-DD or `all`.');
   });
 
-  test('refuses when SLACK_BOT_PRIVATE_CHANNEL_REVIEW_CODE is unset', async () => {
-    delete process.env.SLACK_BOT_PRIVATE_CHANNEL_REVIEW_CODE;
-    await send('all');
+  test('refuses in any channel that is not a SLACK_BOT_PRIVATE_CHANNEL* one', async () => {
+    await send('all', 'C_PUBLIC');
     await waitUntil(() => fetchMock.mock.calls.length > 0);
     expect(clearChannelHistory).not.toHaveBeenCalled();
-    expect(lastText()).toContain('SLACK_BOT_PRIVATE_CHANNEL_REVIEW_CODE');
+    expect(postToChannel).not.toHaveBeenCalled();
+    expect(lastText()).toContain('only works in the bot\'s private channels');
+  });
+
+  test('refuses without a channel id, and ignores an unset private channel var', async () => {
+    delete process.env.SLACK_BOT_PRIVATE_CHANNEL_TECH_BLOG;
+    await send('all', '');
+    await waitUntil(() => fetchMock.mock.calls.length === 1);
+    await send('all', 'C_TECH');
+    await waitUntil(() => fetchMock.mock.calls.length === 2);
+    expect(clearChannelHistory).not.toHaveBeenCalled();
   });
 
   test('ignores non-owners', async () => {
-    await request(app)
-      .post('/slack/commands')
-      .type('form')
-      .send({ command: '/clear-history', text: 'all', user_id: 'UOTHER', response_url: 'https://hooks.slack.com/x' });
+    await send('all', 'C_REVIEW', 'UOTHER');
     expect(clearChannelHistory).not.toHaveBeenCalled();
   });
 });
@@ -3618,5 +3654,249 @@ describe('POST /slack/interactive — client report "Stop & delete" button', () 
     await postInteraction(stopPayload({ channel: undefined }));
     await new Promise(r => setTimeout(r, 50));
     expect(deleteThread).not.toHaveBeenCalled();
+  });
+});
+
+// ─── Tech blog digest ─────────────────────────────────────────────────────────
+
+describe('POST /slack/commands — /scan-tech-blog', () => {
+  let fetchMock;
+  const pickAi = { title: 'Agents at scale', url: 'https://eng.example.com/agents', source: 'Example Eng', summary: 'Tóm tắt AI.' };
+  const pickOther = { title: 'Sharding <Postgres>', url: 'https://eng.example.com/pg', source: '', summary: 'Tóm tắt DB.' };
+
+  const send = (text = '', user_id = 'U093ZDNQJF3') =>
+    request(app)
+      .post('/slack/commands')
+      .type('form')
+      .send({ command: '/scan-tech-blog', text, user_id, response_url: 'https://hooks.slack.com/x' });
+  const lastText = () => JSON.parse(fetchMock.mock.calls.at(-1)[1].body).text;
+
+  beforeEach(() => {
+    fetchMock = jest.fn().mockResolvedValue({ ok: true });
+    global.fetch = fetchMock;
+    process.env.SLACK_BOT_PRIVATE_CHANNEL_TECH_BLOG = 'CTECH';
+    runTechBlogScan.mockResolvedValue({ ok: true, result: { ai: [pickAi], other: [pickOther] } });
+    postToChannel.mockResolvedValue('1900.000001');
+  });
+
+  afterEach(() => {
+    delete global.fetch;
+    delete process.env.SLACK_BOT_PRIVATE_CHANNEL_TECH_BLOG;
+  });
+
+  test('ignores users other than the owner', async () => {
+    await send('', 'UOTHER');
+    expect(runTechBlogScan).not.toHaveBeenCalled();
+  });
+
+  test('scans the given UTC day and posts a digest with a Save button per post', async () => {
+    await send('2026-10-30');
+    await waitUntil(() => fetchMock.mock.calls.length > 0);
+
+    expect(runTechBlogScan).toHaveBeenCalledWith('2026-10-30', {});
+    const [channel, text, opts] = postToChannel.mock.calls[0];
+    expect(channel).toBe('CTECH');
+    expect(opts.unfurl).toBe(false);
+    expect(text).toBe('Tech blog digest — 2026-10-30 UTC (2 posts)');
+    const buttons = opts.blocks.filter(b => b.type === 'actions').map(b => b.elements[0]);
+    expect(buttons.map(b => [b.action_id, b.value])).toEqual([
+      ['tech_blog_save_1', pickAi.url],
+      ['tech_blog_save_2', pickOther.url],
+    ]);
+    expect(opts.blocks[2].text.text).toBe('*1. <https://eng.example.com/agents|Agents at scale>* — _Example Eng_\nTóm tắt AI.');
+    expect(opts.blocks[5].text.text).toBe('*2. <https://eng.example.com/pg|Sharding  Postgres >*\nTóm tắt DB.');
+    expect(lastText()).toBe('✅ Posted 2 post(s) to <#CTECH>.');
+  });
+
+  test('the digest ends with a coverage line, naming failed sources', async () => {
+    runTechBlogScan.mockResolvedValue({ ok: true, result: { ai: [pickAi], other: [], checked: [
+      { source: 'A', status: 'ok' }, { source: 'B', status: 'none' }, { source: 'C', status: 'failed' }, { source: 'D', status: 'failed' },
+    ] } });
+    await send('2026-10-30');
+    await waitUntil(() => postToChannel.mock.calls.length > 0);
+    const last = postToChannel.mock.calls[0][2].blocks.at(-1);
+    expect(last).toEqual({ type: 'context', elements: [{ type: 'mrkdwn', text: 'Quét 4 nguồn · 1 có bài trong ngày · 1 không có bài · ⚠️ lỗi: C, D' }] });
+  });
+
+  test('no argument scans the previous UTC day', async () => {
+    await send('');
+    await waitUntil(() => runTechBlogScan.mock.calls.length > 0);
+    expect(runTechBlogScan.mock.calls[0][0]).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+  });
+
+  test('rejects an invalid date without scanning', async () => {
+    await send('yesterday');
+    await waitUntil(() => fetchMock.mock.calls.length > 0);
+    expect(runTechBlogScan).not.toHaveBeenCalled();
+    expect(lastText()).toBe('❌ Invalid date `yesterday` — use YYYY-MM-DD (UTC day to scan).');
+  });
+
+  test('an empty window posts a short notice', async () => {
+    runTechBlogScan.mockResolvedValue({ ok: true, result: { ai: [], other: [] } });
+    await send('2026-10-30');
+    await waitUntil(() => fetchMock.mock.calls.length > 0);
+    expect(postToChannel).toHaveBeenCalledWith('CTECH', '📭 *Tech blog digest — 2026-10-30 UTC*\nKhông có bài nào đáng đọc trong ngày này.');
+    expect(lastText()).toBe('📭 No posts found for 2026-10-30 UTC.');
+  });
+
+  test('a failed scan is reported in the channel and to the caller', async () => {
+    runTechBlogScan.mockResolvedValue({ ok: false, error: 'boom' });
+    await send('2026-10-30');
+    await waitUntil(() => fetchMock.mock.calls.length > 0);
+    expect(postToChannel).toHaveBeenCalledWith('CTECH', '⚠️ *Tech blog scan failed* (2026-10-30 UTC)\n`boom`');
+    expect(lastText()).toBe('⚠️ Scan failed: `boom`');
+  });
+
+  test('without the channel configured nothing runs', async () => {
+    delete process.env.SLACK_BOT_PRIVATE_CHANNEL_TECH_BLOG;
+    await send('2026-10-30');
+    await waitUntil(() => fetchMock.mock.calls.length > 0);
+    expect(runTechBlogScan).not.toHaveBeenCalled();
+    expect(lastText()).toBe('⏭️ `SLACK_BOT_PRIVATE_CHANNEL_TECH_BLOG` is not set.');
+  });
+
+  test('a second scan while one runs is refused', async () => {
+    let finish;
+    runTechBlogScan.mockReturnValueOnce(new Promise(r => { finish = r; }));
+    await send('2026-10-30');
+    await waitUntil(() => runTechBlogScan.mock.calls.length === 1);
+    await send('2026-10-30');
+    await waitUntil(() => fetchMock.mock.calls.length === 1);
+    expect(lastText()).toBe('⏳ A tech blog scan is already running.');
+    expect(runTechBlogScan).toHaveBeenCalledTimes(1);
+    finish({ ok: true, result: { ai: [], other: [] } });
+    await waitUntil(() => fetchMock.mock.calls.length === 2);
+  });
+});
+
+describe('POST /slack/interactive — tech blog "Save" button', () => {
+  const URL_ = 'https://eng.example.com/agents';
+  const blocks = [
+    { type: 'section', text: { type: 'mrkdwn', text: 'post' } },
+    { type: 'actions', block_id: 'tech_blog_1', elements: [{ action_id: 'tech_blog_save_1', value: URL_ }] },
+  ];
+  const savePayload = (overrides = {}) => ({
+    type: 'block_actions',
+    user: { id: 'U093ZDNQJF3' },
+    channel: { id: 'CTECH' },
+    message: { ts: '1900.000001', text: 'Tech blog digest', blocks },
+    response_url: 'https://hooks.slack.com/actions/T000/123/abc',
+    actions: [{ action_id: 'tech_blog_save_1', block_id: 'tech_blog_1', value: URL_ }],
+    ...overrides,
+  });
+  const statusOf = call => call[2].blocks.find(b => b.type === 'context')?.elements[0].text;
+
+  beforeEach(() => {
+    replaceOriginal.mockResolvedValue(true);
+  });
+
+  test('runs read-tech-blog, marks the post saved and replies in the thread', async () => {
+    runReadTechBlog.mockResolvedValue({ ok: true, output: 'Saved to ai-agents-output/tech-blogs/agents' });
+    await postInteraction(savePayload());
+    await waitUntil(() => postToChannel.mock.calls.length === 1);
+
+    expect(runReadTechBlog).toHaveBeenCalledWith(URL_, {});
+    expect(replaceOriginal.mock.calls.map(statusOf)).toEqual(['⏳ Đang lưu bài viết…', '✅ Đã lưu']);
+    expect(replaceOriginal.mock.calls.every(c => c[2].unfurl === false)).toBe(true);
+    expect(replaceOriginal.mock.calls[1][2].blocks).toHaveLength(2); // section + status, button gone
+    expect(postToChannel).toHaveBeenCalledWith('CTECH', `💾 *Saved* <${URL_}>\nSaved to ai-agents-output/tech-blogs/agents`, { threadTs: '1900.000001', unfurl: false });
+  });
+
+  test('an error keeps the button, shows a failure and tells the thread nothing was saved', async () => {
+    runReadTechBlog.mockResolvedValue({ ok: false, error: 'claude exited 1: boom' });
+    await postInteraction(savePayload());
+    await waitUntil(() => postToChannel.mock.calls.length === 1);
+
+    expect(statusOf(replaceOriginal.mock.calls[1])).toBe('⚠️ Lưu thất bại: `claude exited 1: boom`');
+    expect(replaceOriginal.mock.calls[1][2].blocks).toHaveLength(3); // section + status + button
+    expect(postToChannel).toHaveBeenCalledWith('CTECH', `⚠️ Lưu thất bại <${URL_}>\nclaude exited 1: boom\nBài này chưa được lưu — đọc và lưu thủ công nếu cần.`, { threadTs: '1900.000001', unfurl: false });
+  });
+
+  test('a "nothing was saved" outcome is flagged as not saved — never "Saved" — with the reason in the thread', async () => {
+    runReadTechBlog.mockResolvedValue({ ok: false, notSaved: true, error: 'InfoQ blocks bots with a CAPTCHA' });
+    await postInteraction(savePayload());
+    await waitUntil(() => postToChannel.mock.calls.length === 1);
+
+    expect(statusOf(replaceOriginal.mock.calls[1])).toBe('⚠️ Chưa lưu được: `InfoQ blocks bots with a CAPTCHA`');
+    expect(replaceOriginal.mock.calls[1][2].blocks).toHaveLength(3); // button kept
+    const [, text] = postToChannel.mock.calls[0];
+    expect(text).toBe(`⚠️ Chưa lưu được <${URL_}>\nInfoQ blocks bots with a CAPTCHA\nBài này chưa được lưu — đọc và lưu thủ công nếu cần.`);
+    expect(text).not.toContain('Saved');
+    expect(replaceOriginal.mock.calls.map(statusOf)).not.toContain('✅ Đã lưu');
+  });
+
+  test('only the owner can save', async () => {
+    await postInteraction(savePayload({ user: { id: 'UOTHER' } }));
+    await waitUntil(() => respondEphemeral.mock.calls.length === 1);
+    expect(respondEphemeral).toHaveBeenCalledWith(expect.any(String), 'Only <@U093ZDNQJF3> can save blogs.');
+    expect(runReadTechBlog).not.toHaveBeenCalled();
+  });
+
+  test('a non-http value is ignored', async () => {
+    await postInteraction(savePayload({ actions: [{ action_id: 'tech_blog_save_1', block_id: 'tech_blog_1', value: 'javascript:alert(1)' }] }));
+    await new Promise(r => setTimeout(r, 30));
+    expect(runReadTechBlog).not.toHaveBeenCalled();
+  });
+
+  test('saves running at once keep each other\'s status lines (no stale-snapshot overwrite)', async () => {
+    const URL2 = 'https://eng.example.com/second';
+    const two = [
+      { type: 'section', text: { type: 'mrkdwn', text: 'post 1' } },
+      { type: 'actions', block_id: 'tech_blog_1', elements: [{ action_id: 'tech_blog_save_1', value: URL_ }] },
+      { type: 'section', text: { type: 'mrkdwn', text: 'post 2' } },
+      { type: 'actions', block_id: 'tech_blog_2', elements: [{ action_id: 'tech_blog_save_2', value: URL2 }] },
+    ];
+    const click = (n, url) => savePayload({
+      message: { ts: '1900.000009', text: 'Tech blog digest', blocks: two }, // both clicks carry the original snapshot
+      actions: [{ action_id: `tech_blog_save_${n}`, block_id: `tech_blog_${n}`, value: url }],
+    });
+    let finishFirst;
+    let finishSecond;
+    runReadTechBlog
+      .mockReturnValueOnce(new Promise(r => { finishFirst = r; }))
+      .mockReturnValueOnce(new Promise(r => { finishSecond = r; }));
+
+    await postInteraction(click(1, URL_));
+    await waitUntil(() => runReadTechBlog.mock.calls.length === 1);
+    await postInteraction(click(2, URL2));
+    await waitUntil(() => runReadTechBlog.mock.calls.length === 2);
+    finishFirst({ ok: true, output: '' });
+    await waitUntil(() => replaceOriginal.mock.calls.length === 3);
+
+    const statuses = replaceOriginal.mock.calls.at(-1)[2].blocks.filter(b => b.type === 'context').map(b => b.elements[0].text);
+    expect(statuses).toEqual(['✅ Đã lưu', '⏳ Đang lưu bài viết…']);
+    expect(replaceOriginal.mock.calls.at(-1)[2].blocks.some(b => b.type === 'actions')).toBe(false);
+
+    finishSecond({ ok: true, output: '' });
+    await waitUntil(() => replaceOriginal.mock.calls.length === 4);
+    expect(replaceOriginal.mock.calls.at(-1)[2].blocks.filter(b => b.type === 'context').map(b => b.elements[0].text))
+      .toEqual(['✅ Đã lưu', '✅ Đã lưu']);
+  });
+
+  test('retrying a failed save replaces its warning line instead of stacking another', async () => {
+    runReadTechBlog.mockResolvedValueOnce({ ok: false, error: 'blocked' }).mockResolvedValueOnce({ ok: true, output: '' });
+    await postInteraction(savePayload());
+    await waitUntil(() => replaceOriginal.mock.calls.length === 2);
+
+    // after the failure the message holds: section, warning, button
+    const afterFailure = replaceOriginal.mock.calls[1][2].blocks;
+    await postInteraction(savePayload({ message: { ts: '1900.000001', text: 'Tech blog digest', blocks: afterFailure } }));
+    await waitUntil(() => replaceOriginal.mock.calls.length === 4);
+
+    const last = replaceOriginal.mock.calls.at(-1)[2].blocks;
+    expect(last.filter(b => b.type === 'context').map(b => b.elements[0].text)).toEqual(['✅ Đã lưu']);
+  });
+
+  test('a second click on the same post while saving is refused', async () => {
+    let finish;
+    runReadTechBlog.mockReturnValueOnce(new Promise(r => { finish = r; }));
+    await postInteraction(savePayload());
+    await waitUntil(() => runReadTechBlog.mock.calls.length === 1);
+    await postInteraction(savePayload());
+    await waitUntil(() => respondEphemeral.mock.calls.length === 1);
+    expect(respondEphemeral).toHaveBeenCalledWith(expect.any(String), '⏳ Already saving this post.');
+    expect(runReadTechBlog).toHaveBeenCalledTimes(1);
+    finish({ ok: true, output: '' });
+    await waitUntil(() => replaceOriginal.mock.calls.length === 2);
   });
 });

@@ -10,6 +10,7 @@ const { extractJiraKey, extractAllJiraKeys, extractSlackThread, extractPrUrls } 
 const { fetchPrTitle, fetchPrData, fetchPrCommits, approvePr } = require('./github');
 const { runPrReview, reviewSkipReason, cancelReview } = require('./review');
 const { runClientReport, extractSessionId, extractNotePaths, deleteClientReportNote, sessionLine } = require('./clientReport');
+const { runTechBlogScan, runReadTechBlog, previousUtcDay, startTechBlogScheduler } = require('./techBlog');
 
 const ALLOWED_BASE_BRANCHES = ['develop', 'releasing_staging', 'main', 'master'];
 const NOTIFY_BASE_BRANCHES = ['develop', 'releasing_staging'];
@@ -30,6 +31,9 @@ const REVIEW_AGAIN_ACTION = 'review_pr_again';
 const REVIEW_CANCEL_ACTION = 'review_pr_cancel';
 const REVIEW_ACK_ACTION = 'review_pr_ack';
 const CLIENT_REPORT_STOP_ACTION = 'client_report_stop';
+// Each Save button gets its own action_id (`tech_blog_save_<n>`) — Slack wants
+// them unique within a message.
+const TECH_BLOG_SAVE_ACTION = 'tech_blog_save';
 // How many times teammates (anyone but me) may re-run a review from the button,
 // per PR. I'm unlimited — the cap only stops the button being hammered.
 const MAX_TEAMMATE_REVIEWS = 2;
@@ -41,6 +45,11 @@ const reviewsInFlight = new Set();
 // `<channel>:<ts>` of client-report threads being investigated — same duplicate
 // guard as `reviewsInFlight`, so a second 👀 can't start a second investigation.
 const clientReportsInFlight = new Set();
+
+// A tech-blog scan is running / blog URLs being saved — the scan takes minutes,
+// so a second `/scan-tech-blog` or a double-clicked Save must not start another.
+let techBlogScanRunning = false;
+const techBlogSavesInFlight = new Set();
 
 // PR URL → number of "Review again" runs started by teammates. In memory only,
 // so a restart clears the budget; the cap is a courtesy guard, not a quota.
@@ -261,7 +270,7 @@ app.post('/slack/commands', async (req, res) => {
     return res.status(401).send('invalid signature');
   }
 
-  const { command, text, user_id, response_url } = req.body || {};
+  const { command, text, user_id, response_url, channel_id } = req.body || {};
 
   // Only the owner may trigger any slash command. Silently 200 for everyone else
   // (no reply at all — don't reveal that this is a personal bot).
@@ -280,9 +289,16 @@ app.post('/slack/commands', async (req, res) => {
     return;
   }
 
-  if (command === '/clear-history') {
-    runClearHistoryCommand(text, response_url).catch(err => {
-      console.log('[Slack cmd] /clear-history failed:', err.message);
+  if (command === '/clear-message') {
+    runClearMessageCommand(text, channel_id, response_url).catch(err => {
+      console.log('[Slack cmd] /clear-message failed:', err.message);
+    });
+    return;
+  }
+
+  if (command === '/scan-tech-blog') {
+    runScanTechBlogCommand(text, response_url).catch(err => {
+      console.log('[Slack cmd] /scan-tech-blog failed:', err.message);
     });
     return;
   }
@@ -292,6 +308,178 @@ app.post('/slack/commands', async (req, res) => {
     text: `❌ Unknown command \`${command}\`.`,
   });
 });
+
+// ─── Tech blog digest ─────────────────────────────────────────────────────────
+
+const techBlogChannel = () => process.env.SLACK_BOT_PRIVATE_CHANNEL_TECH_BLOG;
+
+/**
+ * Scans the tech blogs for one UTC day and posts the top AI + top other picks to
+ * SLACK_BOT_PRIVATE_CHANNEL_TECH_BLOG, each with a Save button. Runs daily at
+ * 00:00 UTC (07:00 UTC+7) for the previous UTC day, and on `/scan-tech-blog`.
+ *
+ * @param {string} [day] - YYYY-MM-DD (UTC); default the previous UTC day
+ * @returns {Promise<{ok: boolean, message: string}>} message is shown to the slash-command caller
+ */
+async function runTechBlogDigest(day = previousUtcDay()) {
+  const channel = techBlogChannel();
+  if (!channel) return { ok: false, message: '⏭️ `SLACK_BOT_PRIVATE_CHANNEL_TECH_BLOG` is not set.' };
+  if (techBlogScanRunning) return { ok: false, message: '⏳ A tech blog scan is already running.' };
+
+  techBlogScanRunning = true;
+  try {
+    const scan = await runTechBlogScan(day, {});
+    if (!scan.ok) {
+      await postToChannel(channel, `⚠️ *Tech blog scan failed* (${day} UTC)\n\`${scan.error}\``);
+      return { ok: false, message: `⚠️ Scan failed: \`${scan.error}\`` };
+    }
+
+    const { ai, other } = scan.result;
+    if (!ai.length && !other.length) {
+      await postToChannel(channel, `📭 *Tech blog digest — ${day} UTC*\nKhông có bài nào đáng đọc trong ngày này.`);
+      return { ok: true, message: `📭 No posts found for ${day} UTC.` };
+    }
+
+    const { text, blocks } = techBlogDigestMessage(day, ai, other, scan.result.checked);
+    const ts = await postToChannel(channel, text, { blocks, unfurl: false });
+    if (!ts) return { ok: false, message: '⚠️ Scan finished but the digest could not be posted.' };
+    return { ok: true, message: `✅ Posted ${ai.length + other.length} post(s) to <#${channel}>.` };
+  } finally {
+    techBlogScanRunning = false;
+  }
+}
+
+/** Block Kit digest: a section per post with its Vietnamese summary and a Save button. */
+function techBlogDigestMessage(day, ai, other, checked = []) {
+  const blocks = [{ type: 'header', text: { type: 'plain_text', text: `📰 Tech blog digest — ${day} UTC`, emoji: true } }];
+  let n = 0;
+  const addGroup = (title, picks) => {
+    if (!picks.length) return;
+    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*${title}*` } });
+    for (const p of picks) {
+      n += 1;
+      const source = p.source ? ` — _${p.source}_` : '';
+      blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `*${n}. <${p.url}|${p.title.replace(/[<>|]/g, ' ')}>*${source}\n${p.summary}` } });
+      blocks.push({
+        type: 'actions',
+        block_id: `tech_blog_${n}`,
+        elements: [{
+          type: 'button',
+          action_id: `${TECH_BLOG_SAVE_ACTION}_${n}`,
+          text: { type: 'plain_text', text: '💾 Save', emoji: true },
+          value: p.url,
+          style: 'primary',
+        }],
+      });
+    }
+  };
+  addGroup('🤖 AI', ai);
+  addGroup('🧱 Backend, system design, cloud, data, security', other);
+  if (checked.length) {
+    const names = status => checked.filter(c => c.status === status).map(c => c.source);
+    const failed = names('failed');
+    const line = `Quét ${checked.length} nguồn · ${names('ok').length} có bài trong ngày · ${names('none').length} không có bài`
+      + (failed.length ? ` · ⚠️ lỗi: ${failed.join(', ')}` : '');
+    blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: line }] });
+  }
+  return { text: `Tech blog digest — ${day} UTC (${n} posts)`, blocks };
+}
+
+/** `/scan-tech-blog [YYYY-MM-DD]` — the daily scan on demand (day = UTC day to scan). */
+async function runScanTechBlogCommand(text, responseUrl) {
+  const day = (text || '').trim() || previousUtcDay();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) {
+    await postToResponseUrl(responseUrl, { response_type: 'ephemeral', text: `❌ Invalid date \`${day}\` — use YYYY-MM-DD (UTC day to scan).` });
+    return;
+  }
+  const { message } = await runTechBlogDigest(day);
+  await postToResponseUrl(responseUrl, { response_type: 'ephemeral', text: message });
+}
+
+/**
+ * Replaces a Save button's actions block with a status line (optionally keeping
+ * the button under it). A status line from an earlier update of the same button
+ * is replaced, not stacked.
+ */
+function techBlogBlocksWithStatus(blocks, blockId, status, { keepButton = false } = {}) {
+  const statusId = `${blockId}_status`;
+  return (blocks || []).filter(b => b.block_id !== statusId).flatMap(b => {
+    if (b.block_id !== blockId) return [b];
+    const context = { type: 'context', block_id: statusId, elements: [{ type: 'mrkdwn', text: status }] };
+    return keepButton ? [context, b] : [context];
+  });
+}
+
+// `<channel>:<ts>` of a digest → { base, statuses, running }. Several saves can run
+// at once on one digest, and each click's payload is a snapshot from *its* moment —
+// rebuilding from it alone would wipe the status lines the other saves put up (a
+// finished save would bring back the Save button of one still running). So every
+// update is rendered from the first snapshot + all statuses. Dropped once no save
+// on the message is running; the message in Slack then holds the final state.
+const techBlogDigests = new Map();
+
+function renderTechBlogDigest(digest) {
+  let blocks = digest.base;
+  for (const [blockId, { status, opts }] of digest.statuses) {
+    blocks = techBlogBlocksWithStatus(blocks, blockId, status, opts);
+  }
+  return blocks;
+}
+
+/**
+ * A `💾 Save` click: runs the everfit-api `read-tech-blog` skill on the post and
+ * reports in the message. Owner-only; one run per URL at a time.
+ */
+async function handleTechBlogSaveClick(payload, action) {
+  const url = action.value;
+  const channel = payload.channel?.id;
+  const threadTs = payload.message?.ts;
+  if (payload.user?.id !== process.env.MY_SLACK_USER_ID) {
+    await respondEphemeral(payload.response_url, `Only <@${process.env.MY_SLACK_USER_ID}> can save blogs.`);
+    return;
+  }
+  if (!/^https?:\/\/\S+$/i.test(url || '')) return;
+  if (techBlogSavesInFlight.has(url)) {
+    await respondEphemeral(payload.response_url, '⏳ Already saving this post.');
+    return;
+  }
+
+  techBlogSavesInFlight.add(url);
+  const digestKey = `${channel}:${threadTs}`;
+  let digest = techBlogDigests.get(digestKey);
+  if (!digest) {
+    digest = { base: payload.message?.blocks || [], statuses: new Map(), running: 0 };
+    techBlogDigests.set(digestKey, digest);
+  }
+  digest.running += 1;
+
+  const text = payload.message?.text || 'Tech blog digest';
+  const show = (status, opts) => {
+    digest.statuses.set(action.block_id, { status, opts });
+    return replaceOriginal(payload.response_url, text, { blocks: renderTechBlogDigest(digest), unfurl: false });
+  };
+  try {
+    await show('⏳ Đang lưu bài viết…');
+    const result = await runReadTechBlog(url, {});
+    if (result.ok) {
+      const note = result.output ? `\n${result.output.slice(-800)}` : '';
+      await show('✅ Đã lưu');
+      if (channel && threadTs) await postToChannel(channel, `💾 *Saved* <${url}>${note}`, { threadTs, unfurl: false });
+    } else {
+      // Not saved (blocked, paywalled, already read, ...) or errored: never "Saved". The button
+      // stays so it can be retried, and the full reason goes to the thread to save it by hand.
+      const label = result.notSaved ? '⚠️ Chưa lưu được' : '⚠️ Lưu thất bại';
+      await show(`${label}: \`${result.error.slice(0, 300)}\``, { keepButton: true });
+      if (channel && threadTs) {
+        await postToChannel(channel, `${label} <${url}>\n${result.error.slice(0, 800)}\nBài này chưa được lưu — đọc và lưu thủ công nếu cần.`, { threadTs, unfurl: false });
+      }
+    }
+  } finally {
+    techBlogSavesInFlight.delete(url);
+    digest.running -= 1;
+    if (digest.running === 0) techBlogDigests.delete(digestKey);
+  }
+}
 
 async function runTicketsByDayCommand(text, responseUrl) {
   const day = (text || '').trim() || todayInBangkok();
@@ -311,37 +499,39 @@ async function runTicketsByDayCommand(text, responseUrl) {
   });
 }
 
+/** Channel IDs of the bot's private channels — every `SLACK_BOT_PRIVATE_CHANNEL*` env var that is set. */
+function botPrivateChannels() {
+  const ids = Object.entries(process.env)
+    .filter(([key, value]) => key.startsWith('SLACK_BOT_PRIVATE_CHANNEL') && value)
+    .map(([, value]) => value.trim());
+  return [...new Set(ids)];
+}
+
 /**
- * `/clear-history [YYYY-MM-DD|all]` — deletes the bot's own messages in
- * SLACK_BOT_PRIVATE_CHANNEL_REVIEW_CODE for one day (Asia/Bangkok, default today) or all of them.
+ * `/clear-message [YYYY-MM-DD|all]` — deletes the bot's own messages (top-level and
+ * thread replies) in the channel the command is typed in, for one day (Asia/Bangkok,
+ * default today) or all of them. Only works in a `SLACK_BOT_PRIVATE_CHANNEL*` channel;
+ * the result is posted to that channel (an ephemeral notice when it can't be).
  */
-async function runClearHistoryCommand(text, responseUrl) {
+async function runClearMessageCommand(text, channelId, responseUrl) {
+  const ephemeral = message => postToResponseUrl(responseUrl, { response_type: 'ephemeral', text: message });
   const arg = (text || '').trim().toLowerCase() || todayInBangkok();
   const all = arg === 'all';
 
   if (!all && !/^\d{4}-\d{2}-\d{2}$/.test(arg)) {
-    await postToResponseUrl(responseUrl, {
-      response_type: 'ephemeral',
-      text: `❌ Invalid date \`${arg}\` — use YYYY-MM-DD or \`all\`.`,
-    });
+    await ephemeral(`❌ Invalid date \`${arg}\` — use YYYY-MM-DD or \`all\`.`);
     return;
   }
 
-  const channel = process.env.SLACK_BOT_PRIVATE_CHANNEL_REVIEW_CODE;
-  if (!channel) {
-    await postToResponseUrl(responseUrl, {
-      response_type: 'ephemeral',
-      text: '❌ `SLACK_BOT_PRIVATE_CHANNEL_REVIEW_CODE` is not set — nothing to clear.',
-    });
+  if (!channelId || !botPrivateChannels().includes(channelId)) {
+    await ephemeral('❌ `/clear-message` only works in the bot\'s private channels (the `SLACK_BOT_PRIVATE_CHANNEL*` ones) — run it there.');
     return;
   }
 
-  const { deleted, failed } = await clearChannelHistory(channel, all ? null : arg);
+  const { deleted, failed } = await clearChannelHistory(channelId, all ? null : arg);
   const scope = all ? 'all history' : arg;
-  await postToResponseUrl(responseUrl, {
-    response_type: 'ephemeral',
-    text: `🧹 Cleared ${deleted} message${deleted === 1 ? '' : 's'} from the preview channel (${scope})${failed ? ` — ${failed} could not be deleted` : ''}.`,
-  });
+  const result = `🧹 Cleared ${deleted} message${deleted === 1 ? '' : 's'} from this channel (${scope})${failed ? ` — ${failed} could not be deleted` : ''}.`;
+  if (!(await postToChannel(channelId, result))) await ephemeral(result);
 }
 
 async function postToResponseUrl(url, payload) {
@@ -1428,6 +1618,8 @@ app.post('/slack/interactive', async (req, res) => {
     await handleReviewAckClick(payload, action);
   } else if (action?.action_id === CLIENT_REPORT_STOP_ACTION) {
     await handleClientReportStopClick(payload);
+  } else if (action?.action_id?.startsWith(`${TECH_BLOG_SAVE_ACTION}_`)) {
+    await handleTechBlogSaveClick(payload, action);
   }
 });
 
@@ -1456,6 +1648,8 @@ function verifySlackSignature(req) {
 if (require.main === module) {
   const PORT = process.env.PORT || 3000;
   app.listen(PORT, () => console.log(`Bot running on port ${PORT}`));
+  // Daily tech blog digest at 00:00 UTC (07:00 UTC+7); a no-op without the channel.
+  if (techBlogChannel()) startTechBlogScheduler(() => runTechBlogDigest());
 }
 
 module.exports = app;
