@@ -1,0 +1,64 @@
+tests/slack.test.js
+  s_2a01cb6fbe8883::t_9f94c57d58a9bc 10-11,20-21,25,755-810
+coverage/lcov-report/block-navigation.js
+  s_2a01cb6fbe8883::t_2de2eba529367f 1-87
+src/squad.js
+  s_2a01cb6fbe8883::t_287cf47eebf6cd 1-35,37-40,44-48,50-152,154-219,221,223,225-246,249,251-368
+  s_2a01cb6fbe8883::t_19496ab512b723 153,220,222,224,247-248,250
+  s_2a01cb6fbe8883::t_4a0203a6a536da 36,41-43,49
+src/index.js
+  s_2a01cb6fbe8883::t_85a93bd145a9c7 156-169,1189-1194,1293-1297
+  s_2a01cb6fbe8883::t_0116d4ec6892cd 8,13,36-37,55-58,140-154,170-175,220-222,1145-1175,1178-1188,1196-1292,1298-1378,1991-1994
+  s_2a01cb6fbe8883::t_52b93eae172df0 1176-1177,1195
+  s_2a01cb6fbe8883::t_23ecce744df0ea 155
+coverage/coverage-final.json
+  s_2a01cb6fbe8883::t_2de2eba529367f 1-2
+coverage/lcov-report/prettify.css
+  s_2a01cb6fbe8883::t_2de2eba529367f 1
+coverage/lcov-report/base.css
+  s_2a01cb6fbe8883::t_2de2eba529367f 1-224
+src/slack.js
+  s_2a01cb6fbe8883::t_582d9c791ab71a 460-508,525-526
+coverage/lcov-report/prettify.js
+  s_2a01cb6fbe8883::t_2de2eba529367f 1-2
+coverage/clover.xml
+  s_2a01cb6fbe8883::t_2de2eba529367f 1-125
+tests/squad.test.js
+  s_2a01cb6fbe8883::t_2de2eba529367f 70-71
+  s_2a01cb6fbe8883::t_4a0203a6a536da 166-169
+  s_2a01cb6fbe8883::t_9f94c57d58a9bc 1-69,72-165,170-467
+coverage/lcov-report/squad.js.html
+  s_2a01cb6fbe8883::t_2de2eba529367f 1-1189
+coverage/lcov.info
+  s_2a01cb6fbe8883::t_2de2eba529367f 1-250
+tests/index.test.js
+  s_2a01cb6fbe8883::t_1bcccefd88a0a3 25-26,40-47,67-68,75-76,4089-4110,4112-4113,4160-4390,4392-4394,4408-4508,4516-4599
+  s_2a01cb6fbe8883::t_85a93bd145a9c7 4111,4114-4159,4391,4395-4407,4509-4515
+.env.example
+  s_2a01cb6fbe8883::t_a5d7994346fe2b 58,65-73
+  s_2a01cb6fbe8883::t_85a93bd145a9c7 74-76
+CLAUDE.md
+  s_2a01cb6fbe8883::t_85a93bd145a9c7 180
+  s_2a01cb6fbe8883::t_a5d7994346fe2b 25,37,61-63,178-179,181-182,219,276,280
+  s_2a01cb6fbe8883::t_4a0203a6a536da 60
+coverage/lcov-report/sorter.js
+  s_2a01cb6fbe8883::t_2de2eba529367f 1-210
+coverage/lcov-report/index.html
+  s_2a01cb6fbe8883::t_2de2eba529367f 1-116
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "835bbc5b5fc9b72c32ecc0c03b8c08b48881b7be",
+  "prompts": {},
+  "sessions": {
+    "s_2a01cb6fbe8883": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "7772f74f-6bb8-4844-8750-55b17fb12113",
+        "model": "claude-sonnet-5-5"
+      },
+      "human_author": "Huy Nguyen Nhat <huyntp1103@gmail.com>"
+    }
+  }
+}
