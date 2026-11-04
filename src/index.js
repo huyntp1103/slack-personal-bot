@@ -5,11 +5,12 @@ require('dotenv').config();
 const crypto = require('crypto');
 const express = require('express');
 const { transitionIssue, addComment, getIssue, getIssueSummary } = require('./jira');
-const { replyToThread, fetchMessage, searchMyMessages, preview, buildThreadLink, respondEphemeral, postToChannel, fetchThreadMessages, replaceOriginal, reactToMessage, deleteMessage, fetchThreadReply, deleteStartingReviewMessages, clearChannelHistory, deleteThread } = require('./slack');
+const { replyToThread, fetchMessage, searchMyMessages, preview, buildThreadLink, respondEphemeral, postToChannel, fetchThreadMessages, replaceOriginal, reactToMessage, deleteMessage, fetchThreadReply, deleteStartingReviewMessages, clearChannelHistory, deleteThread, getBotUserId, uploadFileToThread } = require('./slack');
 const { extractJiraKey, extractAllJiraKeys, extractSlackThread, extractPrUrls } = require('./utils');
 const { fetchPrTitle, fetchPrData, fetchPrCommits, approvePr } = require('./github');
 const { runPrReview, reviewSkipReason, cancelReview } = require('./review');
 const { runClientReport, cancelClientReport, extractSessionId, extractNotePaths, deleteClientReportNote, sessionLine } = require('./clientReport');
+const { runSquadQuestion, runSquadExport, squadSkipReason, saveSquadExport, extractExportPaths, deleteSquadExport } = require('./squad');
 const { runTechBlogScan, runReadTechBlog, previousUtcDay, startTechBlogScheduler } = require('./techBlog');
 
 const ALLOWED_BASE_BRANCHES = ['develop', 'releasing_staging', 'main', 'master'];
@@ -32,6 +33,8 @@ const REVIEW_CANCEL_ACTION = 'review_pr_cancel';
 const REVIEW_ACK_ACTION = 'review_pr_ack';
 const CLIENT_REPORT_STOP_ACTION = 'client_report_stop';
 const CLIENT_REPORT_RETRY_ACTION = 'client_report_retry';
+const SQUAD_STOP_ACTION = 'squad_stop';
+const SQUAD_EXPORT_ACTION = 'squad_export';
 // Each Save button gets its own action_id (`tech_blog_save_<n>`) — Slack wants
 // them unique within a message.
 const TECH_BLOG_SAVE_ACTION = 'tech_blog_save';
@@ -48,6 +51,10 @@ const reviewsInFlight = new Set();
 const clientReportsInFlight = new Set();
 // Threads whose running investigation I asked to restart (🔄 Retry) — the run loop re-runs once the killed process exits.
 const clientReportRetries = new Set();
+
+// `<channel>:<thread ts>` of squad threads with a question or an export running —
+// one run per thread at a time, so a message sent mid-run can't start a second one.
+const squadInFlight = new Set();
 
 // A tech-blog scan is running / blog URLs being saved — the scan takes minutes,
 // so a second `/scan-tech-blog` or a double-clicked Save must not start another.
@@ -130,6 +137,42 @@ function isClientReportChannel(channel) {
   return Boolean(channel) && clientReportChannels().includes(channel);
 }
 
+/** The squad channel (SLACK_SQUAD_CHANNEL) where tagging the bot opens a Q&A thread. Empty when unset. */
+function squadChannel() {
+  return (process.env.SLACK_SQUAD_CHANNEL || '').trim();
+}
+
+/** Whether `userId` may talk to the bot in the squad channel: me, or one of SLACK_SQUAD_ALLOWED_USERS (comma-separated IDs). */
+function isSquadUser(userId) {
+  if (!userId) return false;
+  if (userId === process.env.MY_SLACK_USER_ID) return true;
+  return (process.env.SLACK_SQUAD_ALLOWED_USERS || '')
+    .split(',')
+    .map(id => id.trim())
+    .filter(Boolean)
+    .includes(userId);
+}
+
+/** Squad Q&A is on unless SQUAD_ENABLED is `false`/`0`/`off`/`no` (case-insensitive). */
+function squadEnabled() {
+  return !['false', '0', 'off', 'no'].includes((process.env.SQUAD_ENABLED || '').trim().toLowerCase());
+}
+
+// What a teammate sees while the feature is switched off — my AI budget, not a fault.
+const SQUAD_LIMIT_TEXT = 'Hiện tại lượng dùng AI trong session (5h) của mình đang gần chạm giới hạn nên mình tạm thời chưa trả lời được — bạn thử lại sau nhé 🙏';
+const SQUAD_OFF_OWNER_TEXT = '⏸️ Squad Q&A đang tắt (`SQUAD_ENABLED=false`) — bật lại trong `.env` rồi restart bot.';
+
+/** The notice for `userId` while the feature is off: the usage-limit text for teammates, a reminder for me. */
+function squadDisabledText(userId) {
+  return userId === process.env.MY_SLACK_USER_ID ? SQUAD_OFF_OWNER_TEXT : SQUAD_LIMIT_TEXT;
+}
+
+const SQUAD_START_TEXT = 'Đang tìm hiểu code để trả lời… (có thể mất vài phút)';
+const SQUAD_CONTINUE_TEXT = 'Đang tìm hiểu tiếp câu hỏi của bạn… (có thể mất vài phút)';
+const SQUAD_EXPORT_TEXT = 'Đang xuất file markdown chi tiết… (có thể mất vài phút)';
+const SQUAD_TIP = '💬 _Trả lời trong thread này để hỏi tiếp._';
+const SQUAD_USAGE_TEXT = 'Hỏi mình về business logic hiện tại của everfit-api nhé, ví dụ: `@bot field completed_day nghĩa là gì?`';
+
 const app = express();
 
 app.use(express.json({
@@ -174,6 +217,9 @@ app.post('/slack/events', async (req, res) => {
     if (event.channel && event.channel === clientReportPrivateChannel()) {
       // A hint written in a copied client report's thread → continue the investigation
       await handleClientReportFollowUp(event);
+    } else if (event.channel && event.channel === squadChannel()) {
+      // Tagging the bot in the squad channel → business-logic Q&A thread (or a follow-up in one)
+      await handleSquadMessage(event);
     } else {
       await handleReviewMessage(event);
     }
@@ -1096,6 +1142,240 @@ async function handleClientReportStopClick(payload) {
   for (const r of noteResults.filter(n => !n.ok)) console.error(`[ClientReport stop] note not deleted: ${r.note} (${r.error})`);
 }
 
+// ─── Squad Q&A (SLACK_SQUAD_CHANNEL) ──────────────────────────────────────────
+
+/** `--model` for squad runs: SQUAD_MODEL, else the stronger model (code reading needs it). */
+function squadModel() {
+  return process.env.SQUAD_MODEL || OWNER_REVIEW_MODEL;
+}
+
+/**
+ * A message in the squad channel from me or an allowed teammate.
+ *
+ * - tagging the bot in a root message opens a session — the message's thread is the
+ *   conversation — and the everfit-api `domain-concept` skill answers in Vietnamese
+ * - any later reply from an allowed user in that thread is a follow-up: the same
+ *   claude session resumes (its id is read back from the bot's `🧵 session` footers,
+ *   so a restart is harmless) — no tag needed
+ * - tagging the bot in a thread that has no session yet starts one there, with the
+ *   thread's root text as background
+ *
+ * Everyone else, bots, edits and untagged top-level chatter are ignored.
+ */
+async function handleSquadMessage(event) {
+  if (!isSquadUser(event.user)) return;
+  if (event.subtype || event.bot_id) return;
+  const text = (event.text || '').trim();
+  if (!text) return;
+
+  const channel = event.channel;
+  const isReply = Boolean(event.thread_ts) && event.thread_ts !== event.ts;
+  const threadTs = isReply ? event.thread_ts : event.ts;
+
+  const botId = await getBotUserId();
+  const mentionSource = botId ? `<@${botId}(?:\\|[^>]*)?>` : null;
+  const mentioned = Boolean(mentionSource) && new RegExp(mentionSource).test(text);
+  // Untagged top-level chatter never needs an API call.
+  if (!isReply && !mentioned) return;
+
+  let messages = [];
+  let sessionId = null;
+  if (isReply) {
+    messages = await fetchThreadMessages(channel, threadTs);
+    sessionId = extractSessionId(messages);
+    if (!sessionId && !mentioned) return;
+  }
+
+  // Switched off: answer the people it would have served, with a notice instead of a run.
+  if (!squadEnabled()) {
+    await postToChannel(channel, squadDisabledText(event.user), { threadTs });
+    return;
+  }
+
+  const question = mentionSource ? text.replace(new RegExp(mentionSource, 'g'), '').trim() : text;
+  const key = `${channel}:${threadTs}`;
+  if (squadInFlight.has(key)) {
+    await postToChannel(channel, '⏳ Đang xử lý — gửi lại khi có câu trả lời nhé.', { threadTs });
+    return;
+  }
+  if (!question) {
+    await postToChannel(channel, SQUAD_USAGE_TEXT, { threadTs });
+    return;
+  }
+
+  squadInFlight.add(key);
+  try {
+    console.log(`[Squad] ${key} — ${sessionId ? `follow-up (session ${sessionId})` : 'new session'} from ${event.user}`);
+    const skipReason = squadSkipReason();
+    if (skipReason) {
+      await postSquadResult(channel, threadTs, { ok: false, error: skipReason });
+      return;
+    }
+    const statusTs = await postToChannel(channel, sessionId ? SQUAD_CONTINUE_TEXT : SQUAD_START_TEXT, { threadTs });
+    // A tag inside someone else's thread: that thread's first message is the background.
+    const context = isReply && !sessionId ? messages[0]?.text : undefined;
+    const result = await runSquadQuestion(question, {
+      model: squadModel(),
+      resumeSessionId: sessionId || undefined,
+      context,
+    });
+    await clearClientReportStatus(channel, statusTs);
+    await postSquadResult(channel, threadTs, result);
+  } finally {
+    squadInFlight.delete(key);
+  }
+}
+
+/**
+ * Posts a squad run's outcome in the thread: the Vietnamese answer + session footer
+ * + tip, with the `📄 Export` and `🛑 Stop & delete` buttons — or the error with just
+ * Stop & delete (no session to export from).
+ */
+async function postSquadResult(channel, threadTs, result) {
+  if (!result.ok) {
+    const text = `⚠️ *Không trả lời được*\n\`${result.error}\`\n${SQUAD_TIP}`;
+    await postToChannel(channel, text, { threadTs, blocks: squadBlocks(text, { exportable: false }) });
+    return;
+  }
+  const body = result.answer
+    || '✅ Đã chạy xong nhưng không có câu trả lời — thử hỏi lại hoặc bấm Export để xem chi tiết.';
+  const text = `${body}\n\n${sessionLine(result.sessionId)}\n${SQUAD_TIP}`;
+  await postToChannel(channel, text, { threadTs, blocks: squadBlocks(text, { exportable: true }) });
+}
+
+/** Block Kit body for a squad reply: the text, `📄 Export` (when there is a session) and `🛑 Stop & delete`. */
+function squadBlocks(text, { exportable }) {
+  const elements = [];
+  if (exportable) {
+    elements.push({
+      type: 'button',
+      action_id: SQUAD_EXPORT_ACTION,
+      text: { type: 'plain_text', text: '📄 Export markdown', emoji: true },
+      value: 'export',
+    });
+  }
+  elements.push({
+    type: 'button',
+    action_id: SQUAD_STOP_ACTION,
+    text: { type: 'plain_text', text: '🛑 Stop & delete', emoji: true },
+    value: 'stop',
+    style: 'danger',
+    confirm: {
+      title: { type: 'plain_text', text: 'Stop this session?' },
+      text: { type: 'mrkdwn', text: 'Deletes this whole thread and any exported file in everfit-api.' },
+      confirm: { type: 'plain_text', text: 'Delete' },
+      deny: { type: 'plain_text', text: 'Keep' },
+    },
+  });
+  return [
+    { type: 'section', text: { type: 'mrkdwn', text } },
+    { type: 'actions', elements },
+  ];
+}
+
+/**
+ * A `📄 Export markdown` click: resumes the thread's session and asks for the whole
+ * conversation as one long, agent-readable markdown file, saves it in the clone's
+ * `ai-agents-output/domain-concept/` and uploads it to the thread (the path is always
+ * posted too, in case the upload scope is missing). Squad users only; one run per thread.
+ */
+async function handleSquadExportClick(payload) {
+  const userId = payload.user?.id;
+  const channel = payload.channel?.id;
+  const threadTs = payload.message?.thread_ts || payload.message?.ts;
+  if (!channel || !threadTs) {
+    console.warn('[Squad export] incomplete interaction payload — ignoring');
+    return;
+  }
+  if (channel !== squadChannel()) return;
+  if (!isSquadUser(userId)) {
+    await respondEphemeral(payload.response_url, 'Only the squad can export a session.');
+    return;
+  }
+
+  if (!squadEnabled()) {
+    await respondEphemeral(payload.response_url, squadDisabledText(userId));
+    return;
+  }
+
+  const key = `${channel}:${threadTs}`;
+  if (squadInFlight.has(key)) {
+    await respondEphemeral(payload.response_url, '⏳ Đang xử lý — thử lại khi có câu trả lời.');
+    return;
+  }
+
+  const messages = await fetchThreadMessages(channel, threadTs);
+  const sessionId = extractSessionId(messages);
+  if (!sessionId) {
+    await respondEphemeral(payload.response_url, 'Không tìm thấy session trong thread này — hỏi một câu trước rồi hãy export.');
+    return;
+  }
+
+  squadInFlight.add(key);
+  try {
+    console.log(`[Squad export] ${key} — session ${sessionId}`);
+    const statusTs = await postToChannel(channel, SQUAD_EXPORT_TEXT, { threadTs });
+    const result = await runSquadExport(sessionId, { model: squadModel() });
+    await clearClientReportStatus(channel, statusTs);
+    if (!result.ok) {
+      await postToChannel(channel, `⚠️ *Xuất file thất bại*\n\`${result.error}\``, { threadTs });
+      return;
+    }
+
+    const saved = saveSquadExport(result.markdown, { question: messages[0]?.text, sessionId });
+    if (!saved.ok) {
+      await postToChannel(channel, `⚠️ *Xuất file thất bại*\n\`couldn't save the file: ${saved.error}\``, { threadTs });
+      return;
+    }
+
+    const filename = saved.relPath.split('/').pop();
+    const upload = await uploadFileToThread(channel, threadTs, { filename, content: result.markdown });
+    const kb = Math.max(1, Math.round(saved.bytes / 1024));
+    const lines = [
+      `📄 *Đã xuất file markdown* (${kb} KB) — \`${saved.relPath}\``,
+      '_Đã lưu trong repo everfit-api, viết cho AI agent đọc._',
+    ];
+    if (!upload.ok) {
+      lines.push(`⚠️ Không upload được lên Slack (\`${upload.error}\`) — lấy file trong repo.`);
+    }
+    await postToChannel(channel, lines.join('\n'), { threadTs });
+  } finally {
+    squadInFlight.delete(key);
+  }
+}
+
+/**
+ * A `🛑 Stop & delete` click on a squad reply: deletes every exported file the bot
+ * mentioned in the thread, then every message of the thread (replies first, the root
+ * last). Squad users only; refused while a run is in flight. A message someone else
+ * wrote can't be deleted with my token — the server log shows how many stayed.
+ */
+async function handleSquadStopClick(payload) {
+  const userId = payload.user?.id;
+  const channel = payload.channel?.id;
+  const threadTs = payload.message?.thread_ts || payload.message?.ts;
+  if (!channel || !threadTs) {
+    console.warn('[Squad stop] incomplete interaction payload — ignoring');
+    return;
+  }
+  if (channel !== squadChannel()) return;
+  if (!isSquadUser(userId)) {
+    await respondEphemeral(payload.response_url, 'Only the squad can stop a session.');
+    return;
+  }
+  if (squadInFlight.has(`${channel}:${threadTs}`)) {
+    await respondEphemeral(payload.response_url, '⏳ Đang xử lý — thử lại khi có câu trả lời.');
+    return;
+  }
+
+  const messages = await fetchThreadMessages(channel, threadTs);
+  const files = extractExportPaths(messages);
+  const fileResults = files.map(file => ({ file, ...deleteSquadExport(file) }));
+  const { deleted, failed } = await deleteThread(channel, threadTs);
+  console.log(`[Squad stop] ${channel}:${threadTs} — ${deleted} message(s) deleted, ${failed} failed, files: ${files.join(', ') || 'none'}`);
+  for (const r of fileResults.filter(f => !f.ok)) console.error(`[Squad stop] file not deleted: ${r.file} (${r.error})`);
+}
+
 /**
  * 🗑️ on a message in #backend-review-code → sweeps that message's thread and
  * deletes every "Starting code review for PR #<n>..." message still sitting in
@@ -1708,6 +1988,10 @@ app.post('/slack/interactive', async (req, res) => {
     await handleClientReportStopClick(payload);
   } else if (action?.action_id === CLIENT_REPORT_RETRY_ACTION) {
     await handleClientReportRetryClick(payload);
+  } else if (action?.action_id === SQUAD_EXPORT_ACTION) {
+    await handleSquadExportClick(payload);
+  } else if (action?.action_id === SQUAD_STOP_ACTION) {
+    await handleSquadStopClick(payload);
   } else if (action?.action_id?.startsWith(`${TECH_BLOG_SAVE_ACTION}_`)) {
     await handleTechBlogSaveClick(payload, action);
   }

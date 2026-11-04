@@ -457,6 +457,55 @@ async function replaceOriginal(responseUrl, text, { blocks, unfurl } = {}) {
   }
 }
 
+let botUserId = null;
+
+/**
+ * The bot's own Slack user ID (what `<@U...>` mentions of the bot contain).
+ * SLACK_BOT_USER_ID wins; otherwise `auth.test` is asked once and remembered.
+ * A failed lookup is not cached, so the next message retries.
+ *
+ * @returns {Promise<string|null>}
+ */
+async function getBotUserId() {
+  const fromEnv = (process.env.SLACK_BOT_USER_ID || '').trim();
+  if (fromEnv) return fromEnv;
+  if (botUserId) return botUserId;
+  try {
+    const res = await slack.auth.test();
+    botUserId = res?.user_id ?? null;
+  } catch (err) {
+    console.log('[Slack] getBotUserId failed:', err.message);
+  }
+  return botUserId;
+}
+
+/**
+ * Uploads a text file into a thread (`files.uploadV2`; needs the `files:write`
+ * bot scope). Never throws.
+ *
+ * @param {string} channel
+ * @param {string} threadTs
+ * @param {{filename: string, content: string, title?: string, comment?: string}} file
+ * @returns {Promise<{ok: boolean, error?: string}>}
+ */
+async function uploadFileToThread(channel, threadTs, { filename, content, title, comment }) {
+  try {
+    await slack.filesUploadV2({
+      channel_id: channel,
+      thread_ts: threadTs,
+      filename,
+      title: title || filename,
+      file: Buffer.from(content, 'utf8'),
+      ...(comment ? { initial_comment: comment } : {}),
+    });
+    return { ok: true };
+  } catch (err) {
+    const error = err.data?.error || err.message;
+    console.log(`[Slack] uploadFileToThread(${channel}) failed:`, error);
+    return { ok: false, error };
+  }
+}
+
 module.exports = {
   replyToThread,
   fetchMessage,
@@ -473,4 +522,6 @@ module.exports = {
   postToChannel,
   fetchThreadMessages,
   replaceOriginal,
+  getBotUserId,
+  uploadFileToThread,
 };

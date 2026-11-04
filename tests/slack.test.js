@@ -7,6 +7,8 @@ const mockReactionsAdd = jest.fn();
 const mockSearchMessages = jest.fn();
 const mockChatDelete = jest.fn();
 const mockUserChatDelete = jest.fn();
+const mockAuthTest = jest.fn();
+const mockFilesUploadV2 = jest.fn();
 let mockClientCount = 0; // 1st WebClient is the bot's, 2nd the user-token one
 
 jest.mock('@slack/web-api', () => ({
@@ -15,10 +17,12 @@ jest.mock('@slack/web-api', () => ({
     conversations: { history: mockHistory, replies: mockReplies },
     reactions: { add: mockReactionsAdd },
     search: { messages: mockSearchMessages },
+    auth: { test: mockAuthTest },
+    filesUploadV2: mockFilesUploadV2,
   })),
 }));
 
-const { replyToThread, preview, reactToMessage, deleteMessage, deleteStartingReviewMessages, clearChannelHistory, fetchMessage, fetchThreadReply, searchMyMessages, respondEphemeral, postToChannel, fetchThreadMessages, replaceOriginal, deleteThread } = require('../src/slack');
+const { replyToThread, preview, reactToMessage, deleteMessage, deleteStartingReviewMessages, clearChannelHistory, fetchMessage, fetchThreadReply, searchMyMessages, respondEphemeral, postToChannel, fetchThreadMessages, replaceOriginal, deleteThread, getBotUserId, uploadFileToThread } = require('../src/slack');
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -746,5 +750,61 @@ describe('deleteThread', () => {
     mockReplies.mockRejectedValue(new Error('boom'));
     expect(await deleteThread('CPRIVATE', ROOT)).toEqual({ deleted: 1, failed: 0 });
     expect(mockChatDelete).toHaveBeenCalledWith({ channel: 'CPRIVATE', ts: ROOT });
+  });
+});
+
+
+describe('getBotUserId', () => {
+  afterEach(() => { delete process.env.SLACK_BOT_USER_ID; });
+
+  test('SLACK_BOT_USER_ID wins and no API call is made', async () => {
+    process.env.SLACK_BOT_USER_ID = ' UENV ';
+    expect(await getBotUserId()).toBe('UENV');
+    expect(mockAuthTest).not.toHaveBeenCalled();
+  });
+
+  test('a failed auth.test returns null and is retried next time', async () => {
+    mockAuthTest.mockRejectedValueOnce(new Error('invalid_auth'));
+    expect(await getBotUserId()).toBeNull();
+
+    mockAuthTest.mockResolvedValueOnce({ user_id: 'UBOT' });
+    expect(await getBotUserId()).toBe('UBOT');
+    expect(mockAuthTest).toHaveBeenCalledTimes(2);
+  });
+
+  test('the id is remembered after the first successful lookup', async () => {
+    expect(await getBotUserId()).toBe('UBOT');
+    expect(mockAuthTest).not.toHaveBeenCalled();
+  });
+});
+
+describe('uploadFileToThread', () => {
+  test('uploads the text as a file into the thread', async () => {
+    mockFilesUploadV2.mockResolvedValue({ ok: true });
+
+    const result = await uploadFileToThread('C1', '1.2', { filename: 'a.md', content: '# héllo', comment: 'here' });
+
+    expect(result).toEqual({ ok: true });
+    const arg = mockFilesUploadV2.mock.calls[0][0];
+    expect(arg).toMatchObject({ channel_id: 'C1', thread_ts: '1.2', filename: 'a.md', title: 'a.md', initial_comment: 'here' });
+    expect(arg.file.toString('utf8')).toBe('# héllo');
+  });
+
+  test('uses the given title and omits the comment when there is none', async () => {
+    mockFilesUploadV2.mockResolvedValue({ ok: true });
+    await uploadFileToThread('C1', '1.2', { filename: 'a.md', content: 'x', title: 'My doc' });
+    const arg = mockFilesUploadV2.mock.calls[0][0];
+    expect(arg.title).toBe('My doc');
+    expect(arg).not.toHaveProperty('initial_comment');
+  });
+
+  test('returns the Slack error code instead of throwing', async () => {
+    mockFilesUploadV2.mockRejectedValue(Object.assign(new Error('boom'), { data: { error: 'missing_scope' } }));
+    expect(await uploadFileToThread('C1', '1.2', { filename: 'a.md', content: 'x' })).toEqual({ ok: false, error: 'missing_scope' });
+  });
+
+  test('falls back to the error message when Slack gave no code', async () => {
+    mockFilesUploadV2.mockRejectedValue(new Error('network down'));
+    expect(await uploadFileToThread('C1', '1.2', { filename: 'a.md', content: 'x' })).toEqual({ ok: false, error: 'network down' });
   });
 });

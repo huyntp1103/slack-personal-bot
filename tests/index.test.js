@@ -22,6 +22,8 @@ jest.mock('../src/slack', () => ({
   deleteStartingReviewMessages: jest.fn(),
   clearChannelHistory: jest.fn(),
   deleteThread: jest.fn(),
+  getBotUserId: jest.fn(),
+  uploadFileToThread: jest.fn(),
 }));
 jest.mock('../src/github', () => ({
   fetchPrData: jest.fn(),
@@ -34,6 +36,14 @@ jest.mock('../src/clientReport', () => ({
   runClientReport: jest.fn(),
   cancelClientReport: jest.fn(),
   deleteClientReportNote: jest.fn(),
+}));
+jest.mock('../src/squad', () => ({
+  ...jest.requireActual('../src/squad'),
+  runSquadQuestion: jest.fn(),
+  runSquadExport: jest.fn(),
+  squadSkipReason: jest.fn(),
+  saveSquadExport: jest.fn(),
+  deleteSquadExport: jest.fn(),
 }));
 jest.mock('../src/techBlog', () => ({
   ...jest.requireActual('../src/techBlog'),
@@ -54,12 +64,16 @@ const { fetchPrData, fetchPrTitle, fetchPrCommits, approvePr } = require('../src
 const { runPrReview, reviewSkipReason, cancelReview } = require('../src/review');
 const { runClientReport, cancelClientReport } = require('../src/clientReport');
 const { runTechBlogScan, runReadTechBlog } = require('../src/techBlog');
+const { getBotUserId, uploadFileToThread } = require('../src/slack');
+const { runSquadQuestion, runSquadExport, squadSkipReason, saveSquadExport, deleteSquadExport } = require('../src/squad');
 const { postToChannel, fetchThreadMessages } = require('../src/slack');
 
 process.env.MY_SLACK_USER_ID = 'U093ZDNQJF3';
 process.env.SLACK_REVIEW_CODE_CHANNEL = 'C05F65TBB9P';
 process.env.SLACK_CLIENT_REPORT_CHANNEL = 'C03H5DCAZ45,C064GEV0D6Z';
 process.env.SLACK_BOT_PRIVATE_CHANNEL_CLIENT_REPORT = 'CPRIVATE';
+process.env.SLACK_SQUAD_CHANNEL = 'CSQUAD';
+process.env.SLACK_SQUAD_ALLOWED_USERS = 'UMATE, UMATE2';
 process.env.JIRA_HOST = 'https://everfit.atlassian.net/';
 process.env.ID_IN_REVIEW = '41';
 process.env.ID_QA_READY = '51';
@@ -4070,5 +4084,516 @@ describe('POST /slack/interactive — client report "Retry" button', () => {
     await new Promise(r => setTimeout(r, 50));
     expect(cancelClientReport).not.toHaveBeenCalled();
     expect(respondEphemeral).not.toHaveBeenCalled();
+  });
+});
+
+
+// ─── Squad Q&A ────────────────────────────────────────────────────────────────
+
+describe('/slack/events — squad channel Q&A', () => {
+  const BOT = 'UBOT';
+  const ROOT_TS = '2000.000001';
+  const SQUAD_SESSION = '7d3c1f0e-1a2b-4c3d-8e4f-5a6b7c8d9e0f';
+  const squadEvent = (overrides = {}) => ({
+    type: 'event_callback',
+    event: { type: 'message', user: 'UMATE', channel: 'CSQUAD', text: `<@${BOT}> completed_day nghĩa là gì?`, ts: ROOT_TS, ...overrides },
+  });
+  const send = overrides => request(app).post('/slack/events').send(squadEvent(overrides));
+  const botFooter = { ts: '2000.000002', bot_id: 'B1', text: `Câu trả lời\n\n🧵 session \`${SQUAD_SESSION}\`` };
+
+  beforeEach(() => {
+    getBotUserId.mockResolvedValue(BOT);
+    squadSkipReason.mockReturnValue(null);
+    runSquadQuestion.mockResolvedValue({ ok: true, answer: '*Trả lời*\nlà ngày hoàn thành', sessionId: SQUAD_SESSION });
+    postToChannel.mockResolvedValue('2000.000099');
+    fetchThreadMessages.mockResolvedValue([]);
+    delete process.env.SQUAD_MODEL;
+    delete process.env.SQUAD_ENABLED;
+  });
+
+  describe('SQUAD_ENABLED switch', () => {
+    const LIMIT = 'Hiện tại lượng dùng AI trong session (5h) của mình đang gần chạm giới hạn nên mình tạm thời chưa trả lời được — bạn thử lại sau nhé 🙏';
+    afterEach(() => { delete process.env.SQUAD_ENABLED; });
+
+    test.each(['false', 'FALSE', ' off ', '0', 'no'])('"%s" turns it off: a teammate\'s tag gets the usage-limit notice in the thread and nothing runs', async value => {
+      process.env.SQUAD_ENABLED = value;
+      await send();
+      await waitUntil(() => postToChannel.mock.calls.length === 1);
+
+      expect(postToChannel.mock.calls[0]).toEqual(['CSQUAD', LIMIT, { threadTs: ROOT_TS }]);
+      expect(runSquadQuestion).not.toHaveBeenCalled();
+    });
+
+    test('I get a reminder that it is switched off, not the usage-limit text', async () => {
+      process.env.SQUAD_ENABLED = 'false';
+      await send({ user: 'U093ZDNQJF3' });
+      await waitUntil(() => postToChannel.mock.calls.length === 1);
+
+      expect(postToChannel.mock.calls[0][1]).toBe('⏸️ Squad Q&A đang tắt (`SQUAD_ENABLED=false`) — bật lại trong `.env` rồi restart bot.');
+      expect(runSquadQuestion).not.toHaveBeenCalled();
+    });
+
+    test('a follow-up in a session thread gets the notice too', async () => {
+      process.env.SQUAD_ENABLED = 'false';
+      fetchThreadMessages.mockResolvedValue([{ ts: ROOT_TS, text: 'q' }, botFooter]);
+      await send({ ts: '2000.000010', thread_ts: ROOT_TS, text: 'còn null?' });
+      await waitUntil(() => postToChannel.mock.calls.length === 1);
+
+      expect(postToChannel.mock.calls[0][1]).toBe(LIMIT);
+      expect(runSquadQuestion).not.toHaveBeenCalled();
+    });
+
+    test('untagged chatter stays unanswered while it is off', async () => {
+      process.env.SQUAD_ENABLED = 'false';
+      await send({ text: 'lunch anyone?' });
+      await new Promise(r => setTimeout(r, 30));
+      expect(postToChannel).not.toHaveBeenCalled();
+    });
+
+    test.each(['true', '1', 'on', ''])('"%s" keeps it on', async value => {
+      process.env.SQUAD_ENABLED = value;
+      await send();
+      await waitUntil(() => runSquadQuestion.mock.calls.length === 1);
+    });
+  });
+
+  describe('opening a session', () => {
+    test('a tag in a root message runs the question and answers in that message\'s thread with both buttons', async () => {
+      await send();
+      await waitUntil(() => postToChannel.mock.calls.length === 2);
+
+      expect(runSquadQuestion).toHaveBeenCalledWith('completed_day nghĩa là gì?', {
+        model: 'claude-sonnet-5-5',
+        resumeSessionId: undefined,
+        context: undefined,
+      });
+      expect(postToChannel.mock.calls[0]).toEqual(['CSQUAD', 'Đang tìm hiểu code để trả lời… (có thể mất vài phút)', { threadTs: ROOT_TS }]);
+      expect(deleteMessage).toHaveBeenCalledWith('CSQUAD', '2000.000099', { ignoreDryRun: true });
+
+      const [channel, text, opts] = postToChannel.mock.calls[1];
+      expect(channel).toBe('CSQUAD');
+      expect(opts.threadTs).toBe(ROOT_TS);
+      expect(text).toBe(`*Trả lời*\nlà ngày hoàn thành\n\n🧵 session \`${SQUAD_SESSION}\`\n💬 _Trả lời trong thread này để hỏi tiếp._`);
+      const buttons = opts.blocks[1].elements;
+      expect(buttons[0]).toMatchObject({ action_id: 'squad_export', value: 'export' });
+      expect(buttons[0].text.text).toBe('📄 Export markdown');
+      expect(buttons[1]).toMatchObject({ action_id: 'squad_stop', style: 'danger', value: 'stop' });
+      expect(buttons[1].text.text).toBe('🛑 Stop & delete');
+      expect(opts.blocks[0]).toEqual({ type: 'section', text: { type: 'mrkdwn', text } });
+    });
+
+    test('SQUAD_MODEL overrides the default model', async () => {
+      process.env.SQUAD_MODEL = 'claude-haiku-5-5';
+      await send();
+      await waitUntil(() => runSquadQuestion.mock.calls.length === 1);
+      expect(runSquadQuestion.mock.calls[0][1].model).toBe('claude-haiku-5-5');
+    });
+
+    test('I can ask too, and a labelled mention (<@BOT|name>) is stripped', async () => {
+      await send({ user: 'U093ZDNQJF3', text: `<@${BOT}|bot> what is end_of_new_use?` });
+      await waitUntil(() => runSquadQuestion.mock.calls.length === 1);
+      expect(runSquadQuestion.mock.calls[0][0]).toBe('what is end_of_new_use?');
+    });
+
+    test('the mention can sit anywhere in the text', async () => {
+      await send({ text: `completed_day nghĩa là gì <@${BOT}>?` });
+      await waitUntil(() => runSquadQuestion.mock.calls.length === 1);
+      expect(runSquadQuestion.mock.calls[0][0]).toBe('completed_day nghĩa là gì ?');
+    });
+
+    test('a tag with no question gets a usage hint and runs nothing', async () => {
+      await send({ text: `<@${BOT}>` });
+      await waitUntil(() => postToChannel.mock.calls.length === 1);
+      expect(postToChannel.mock.calls[0][1]).toContain('Hỏi mình về business logic');
+      expect(postToChannel.mock.calls[0][2]).toEqual({ threadTs: ROOT_TS });
+      expect(runSquadQuestion).not.toHaveBeenCalled();
+    });
+
+    test('a failed run is reported with only the Stop & delete button', async () => {
+      runSquadQuestion.mockResolvedValue({ ok: false, error: 'timed out after 30 min' });
+      await send();
+      await waitUntil(() => postToChannel.mock.calls.length === 2);
+
+      const [, text, opts] = postToChannel.mock.calls[1];
+      expect(text).toBe('⚠️ *Không trả lời được*\n`timed out after 30 min`\n💬 _Trả lời trong thread này để hỏi tiếp._');
+      expect(opts.blocks[1].elements.map(e => e.action_id)).toEqual(['squad_stop']);
+    });
+
+    test('a missing clone/skill is reported without posting a status or running claude', async () => {
+      squadSkipReason.mockReturnValue('no local clone for "everfit-api" (REVIEW_REPO_ROOT=unset)');
+      await send();
+      await waitUntil(() => postToChannel.mock.calls.length === 1);
+
+      expect(runSquadQuestion).not.toHaveBeenCalled();
+      expect(postToChannel.mock.calls[0][1]).toContain('no local clone for "everfit-api"');
+    });
+
+    test('a run that printed nothing still replies, and keeps both buttons', async () => {
+      runSquadQuestion.mockResolvedValue({ ok: true, answer: null, sessionId: SQUAD_SESSION });
+      await send();
+      await waitUntil(() => postToChannel.mock.calls.length === 2);
+
+      expect(postToChannel.mock.calls[1][1]).toContain('✅ Đã chạy xong nhưng không có câu trả lời');
+      expect(postToChannel.mock.calls[1][2].blocks[1].elements).toHaveLength(2);
+    });
+  });
+
+  describe('follow-ups', () => {
+    const reply = (overrides = {}) => ({ ts: '2000.000010', thread_ts: ROOT_TS, text: 'còn trường hợp null thì sao?', ...overrides });
+
+    test('an untagged reply in a thread with a session resumes that session', async () => {
+      fetchThreadMessages.mockResolvedValue([{ ts: ROOT_TS, text: 'q' }, botFooter]);
+      await send(reply());
+      await waitUntil(() => postToChannel.mock.calls.length === 2);
+
+      expect(fetchThreadMessages).toHaveBeenCalledWith('CSQUAD', ROOT_TS);
+      expect(runSquadQuestion).toHaveBeenCalledWith('còn trường hợp null thì sao?', {
+        model: 'claude-sonnet-5-5',
+        resumeSessionId: SQUAD_SESSION,
+        context: undefined,
+      });
+      expect(postToChannel.mock.calls[0][1]).toBe('Đang tìm hiểu tiếp câu hỏi của bạn… (có thể mất vài phút)');
+      expect(postToChannel.mock.calls[1][2].threadTs).toBe(ROOT_TS);
+    });
+
+    test('a tagged reply in a thread with a session also resumes it (tag stripped)', async () => {
+      fetchThreadMessages.mockResolvedValue([{ ts: ROOT_TS, text: 'q' }, botFooter]);
+      await send(reply({ text: `<@${BOT}> và khi inactive?` }));
+      await waitUntil(() => runSquadQuestion.mock.calls.length === 1);
+      expect(runSquadQuestion.mock.calls[0]).toEqual(['và khi inactive?', expect.objectContaining({ resumeSessionId: SQUAD_SESSION })]);
+    });
+
+    test('the newest session footer wins', async () => {
+      const newer = { ts: '2000.000005', bot_id: 'B1', text: '🧵 session `11111111-2222-3333-4444-555555555555`' };
+      fetchThreadMessages.mockResolvedValue([{ ts: ROOT_TS, text: 'q' }, botFooter, newer]);
+      await send(reply());
+      await waitUntil(() => runSquadQuestion.mock.calls.length === 1);
+      expect(runSquadQuestion.mock.calls[0][1].resumeSessionId).toBe('11111111-2222-3333-4444-555555555555');
+    });
+
+    test('a tag in a thread without a session starts one there, with the thread root as background', async () => {
+      fetchThreadMessages.mockResolvedValue([{ ts: ROOT_TS, text: 'Why does the plan skip day 3?' }]);
+      await send(reply({ text: `<@${BOT}> giải thích giúp` }));
+      await waitUntil(() => postToChannel.mock.calls.length === 2);
+
+      expect(runSquadQuestion).toHaveBeenCalledWith('giải thích giúp', {
+        model: 'claude-sonnet-5-5',
+        resumeSessionId: undefined,
+        context: 'Why does the plan skip day 3?',
+      });
+      expect(postToChannel.mock.calls[0][1]).toBe('Đang tìm hiểu code để trả lời… (có thể mất vài phút)');
+      expect(postToChannel.mock.calls[1][2].threadTs).toBe(ROOT_TS);
+    });
+
+    test('an untagged reply in a thread with no session is ordinary chatter', async () => {
+      fetchThreadMessages.mockResolvedValue([{ ts: ROOT_TS, text: 'lunch?' }, { ts: '2000.000003', text: 'sure' }]);
+      await send(reply());
+      await waitUntil(() => fetchThreadMessages.mock.calls.length === 1);
+      await new Promise(r => setTimeout(r, 30));
+
+      expect(runSquadQuestion).not.toHaveBeenCalled();
+      expect(postToChannel).not.toHaveBeenCalled();
+    });
+
+    test('a message sent mid-run gets a "still working" reply and starts nothing', async () => {
+      let finish;
+      runSquadQuestion.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+      fetchThreadMessages.mockResolvedValue([{ ts: ROOT_TS, text: 'q' }, botFooter]);
+      await send(reply());
+      await waitUntil(() => runSquadQuestion.mock.calls.length === 1);
+
+      await send(reply({ ts: '2000.000011', text: 'thêm nữa' }));
+      await waitUntil(() => postToChannel.mock.calls.length === 2);
+      expect(postToChannel.mock.calls[1]).toEqual(['CSQUAD', '⏳ Đang xử lý — gửi lại khi có câu trả lời nhé.', { threadTs: ROOT_TS }]);
+      expect(runSquadQuestion).toHaveBeenCalledTimes(1);
+
+      finish({ ok: true, answer: 'xong', sessionId: SQUAD_SESSION });
+      await waitUntil(() => postToChannel.mock.calls.length === 3);
+    });
+  });
+
+  describe('filters', () => {
+    test.each([
+      ['an unlisted user', { user: 'UOTHER' }],
+      ['a missing user', { user: undefined }],
+      ['a bot message', { bot_id: 'B9' }],
+      ['an edited/subtyped message', { subtype: 'message_changed' }],
+      ['an empty message', { text: '   ' }],
+      ['a root message that does not tag the bot', { text: 'lunch anyone?' }],
+      ['a tag of another user', { text: '<@UELSE> hi' }],
+    ])('ignores %s', async (_label, overrides) => {
+      await send(overrides);
+      await new Promise(r => setTimeout(r, 30));
+      expect(runSquadQuestion).not.toHaveBeenCalled();
+      expect(postToChannel).not.toHaveBeenCalled();
+      expect(fetchThreadMessages).not.toHaveBeenCalled();
+    });
+
+    test('a message in another channel never reaches the squad flow', async () => {
+      await send({ channel: 'COTHER' });
+      await new Promise(r => setTimeout(r, 30));
+      expect(getBotUserId).not.toHaveBeenCalled();
+      expect(runSquadQuestion).not.toHaveBeenCalled();
+    });
+
+    test('does nothing when SLACK_SQUAD_CHANNEL is unset', async () => {
+      delete process.env.SLACK_SQUAD_CHANNEL;
+      try {
+        await send({ channel: undefined });
+        await new Promise(r => setTimeout(r, 30));
+        expect(getBotUserId).not.toHaveBeenCalled();
+      } finally {
+        process.env.SLACK_SQUAD_CHANNEL = 'CSQUAD';
+      }
+    });
+
+    test('cannot tell a tag apart when the bot user id is unknown, so a root message is ignored', async () => {
+      getBotUserId.mockResolvedValue(null);
+      await send();
+      await new Promise(r => setTimeout(r, 30));
+      expect(runSquadQuestion).not.toHaveBeenCalled();
+    });
+
+    test('the second allowed teammate is accepted too', async () => {
+      await send({ user: 'UMATE2' });
+      await waitUntil(() => runSquadQuestion.mock.calls.length === 1);
+    });
+  });
+});
+
+describe('POST /slack/interactive — squad buttons', () => {
+  const THREAD = '2000.000001';
+  const SQUAD_SESSION = '7d3c1f0e-1a2b-4c3d-8e4f-5a6b7c8d9e0f';
+  const EXPORT_PATH = 'ai-agents-output/domain-concept/2026-11-04-completed-day-7d3c1f0e.md';
+  const thread = [
+    { ts: THREAD, user: 'UMATE', text: 'completed_day nghĩa là gì?' },
+    { ts: '2000.000002', bot_id: 'B1', text: `Trả lời\n\n🧵 session \`${SQUAD_SESSION}\`` },
+  ];
+  const click = (action_id, overrides = {}) => ({
+    type: 'block_actions',
+    user: { id: 'UMATE' },
+    channel: { id: 'CSQUAD' },
+    message: { ts: '2000.000002', thread_ts: THREAD },
+    response_url: 'https://hooks.slack.com/actions/T000/123/abc',
+    actions: [{ action_id, value: 'x' }],
+    ...overrides,
+  });
+
+  beforeEach(() => {
+    fetchThreadMessages.mockResolvedValue(thread);
+    postToChannel.mockResolvedValue('2000.000050');
+    runSquadExport.mockResolvedValue({ ok: true, markdown: '# Doc\nbody' });
+    saveSquadExport.mockReturnValue({ ok: true, relPath: EXPORT_PATH, absPath: `/x/${EXPORT_PATH}`, bytes: 4096 });
+    uploadFileToThread.mockResolvedValue({ ok: true });
+    deleteThread.mockResolvedValue({ deleted: 3, failed: 0 });
+    deleteSquadExport.mockReturnValue({ ok: true });
+    delete process.env.SQUAD_MODEL;
+    delete process.env.SQUAD_ENABLED;
+  });
+
+  describe('📄 Export markdown', () => {
+    test('while the feature is off the click gets the notice ephemerally and nothing runs', async () => {
+      process.env.SQUAD_ENABLED = 'false';
+      await postInteraction(click('squad_export'));
+      await waitUntil(() => respondEphemeral.mock.calls.length === 1);
+      expect(respondEphemeral.mock.calls[0][1]).toContain('gần chạm giới hạn');
+      expect(runSquadExport).not.toHaveBeenCalled();
+
+      await postInteraction(click('squad_export', { user: { id: 'U093ZDNQJF3' } }));
+      await waitUntil(() => respondEphemeral.mock.calls.length === 2);
+      expect(respondEphemeral.mock.calls[1][1]).toContain('SQUAD_ENABLED=false');
+      delete process.env.SQUAD_ENABLED;
+    });
+
+    test('exports the thread\'s session, saves the file, uploads it and posts its path', async () => {
+      await postInteraction(click('squad_export'));
+      await waitUntil(() => postToChannel.mock.calls.length === 2);
+
+      expect(runSquadExport).toHaveBeenCalledWith(SQUAD_SESSION, { model: 'claude-sonnet-5-5' });
+      expect(saveSquadExport).toHaveBeenCalledWith('# Doc\nbody', { question: 'completed_day nghĩa là gì?', sessionId: SQUAD_SESSION });
+      expect(uploadFileToThread).toHaveBeenCalledWith('CSQUAD', THREAD, {
+        filename: '2026-11-04-completed-day-7d3c1f0e.md',
+        content: '# Doc\nbody',
+      });
+      expect(postToChannel.mock.calls[0]).toEqual(['CSQUAD', 'Đang xuất file markdown chi tiết… (có thể mất vài phút)', { threadTs: THREAD }]);
+      expect(deleteMessage).toHaveBeenCalledWith('CSQUAD', '2000.000050', { ignoreDryRun: true });
+      expect(postToChannel.mock.calls[1]).toEqual([
+        'CSQUAD',
+        `📄 *Đã xuất file markdown* (4 KB) — \`${EXPORT_PATH}\`\n_Đã lưu trong repo everfit-api, viết cho AI agent đọc._`,
+        { threadTs: THREAD },
+      ]);
+    });
+
+    test('when the upload fails the path is still posted, with the Slack error', async () => {
+      uploadFileToThread.mockResolvedValue({ ok: false, error: 'missing_scope' });
+      await postInteraction(click('squad_export'));
+      await waitUntil(() => postToChannel.mock.calls.length === 2);
+
+      expect(postToChannel.mock.calls[1][1]).toContain(`\`${EXPORT_PATH}\``);
+      expect(postToChannel.mock.calls[1][1]).toContain('⚠️ Không upload được lên Slack (`missing_scope`) — lấy file trong repo.');
+    });
+
+    test('a tiny file is reported as at least 1 KB', async () => {
+      saveSquadExport.mockReturnValue({ ok: true, relPath: EXPORT_PATH, bytes: 10 });
+      await postInteraction(click('squad_export'));
+      await waitUntil(() => postToChannel.mock.calls.length === 2);
+      expect(postToChannel.mock.calls[1][1]).toContain('(1 KB)');
+    });
+
+    test('a failed export run is reported and nothing is saved', async () => {
+      runSquadExport.mockResolvedValue({ ok: false, error: 'claude exited 1: boom' });
+      await postInteraction(click('squad_export'));
+      await waitUntil(() => postToChannel.mock.calls.length === 2);
+
+      expect(postToChannel.mock.calls[1][1]).toBe('⚠️ *Xuất file thất bại*\n`claude exited 1: boom`');
+      expect(saveSquadExport).not.toHaveBeenCalled();
+      expect(uploadFileToThread).not.toHaveBeenCalled();
+    });
+
+    test('a file that cannot be saved is reported and not uploaded', async () => {
+      saveSquadExport.mockReturnValue({ ok: false, error: 'EACCES' });
+      await postInteraction(click('squad_export'));
+      await waitUntil(() => postToChannel.mock.calls.length === 2);
+
+      expect(postToChannel.mock.calls[1][1]).toBe('⚠️ *Xuất file thất bại*\n`couldn\'t save the file: EACCES`');
+      expect(uploadFileToThread).not.toHaveBeenCalled();
+    });
+
+    test('a thread without a session is refused ephemerally', async () => {
+      fetchThreadMessages.mockResolvedValue([thread[0]]);
+      await postInteraction(click('squad_export'));
+      await waitUntil(() => respondEphemeral.mock.calls.length === 1);
+
+      expect(respondEphemeral.mock.calls[0][1]).toContain('Không tìm thấy session');
+      expect(runSquadExport).not.toHaveBeenCalled();
+    });
+
+    test('someone outside the squad is refused ephemerally', async () => {
+      await postInteraction(click('squad_export', { user: { id: 'UOTHER' } }));
+      await waitUntil(() => respondEphemeral.mock.calls.length === 1);
+
+      expect(respondEphemeral).toHaveBeenCalledWith(expect.any(String), 'Only the squad can export a session.');
+      expect(runSquadExport).not.toHaveBeenCalled();
+    });
+
+    test('a click outside the squad channel is ignored', async () => {
+      await postInteraction(click('squad_export', { channel: { id: 'COTHER' } }));
+      await new Promise(r => setTimeout(r, 50));
+      expect(runSquadExport).not.toHaveBeenCalled();
+      expect(fetchThreadMessages).not.toHaveBeenCalled();
+    });
+
+    test('an incomplete payload is ignored', async () => {
+      await postInteraction(click('squad_export', { channel: undefined }));
+      await new Promise(r => setTimeout(r, 50));
+      expect(runSquadExport).not.toHaveBeenCalled();
+    });
+
+    test('is refused while a run is in flight in the thread, and a second export waits for the first', async () => {
+      let finish;
+      runSquadExport.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+      await postInteraction(click('squad_export'));
+      await waitUntil(() => runSquadExport.mock.calls.length === 1);
+
+      await postInteraction(click('squad_export'));
+      await waitUntil(() => respondEphemeral.mock.calls.length === 1);
+      expect(respondEphemeral.mock.calls[0][1]).toBe('⏳ Đang xử lý — thử lại khi có câu trả lời.');
+      expect(runSquadExport).toHaveBeenCalledTimes(1);
+
+      finish({ ok: true, markdown: '# Doc' });
+      await waitUntil(() => postToChannel.mock.calls.length === 2);
+    });
+  });
+
+  describe('🛑 Stop & delete', () => {
+    test('still works while the feature is off (it uses no AI)', async () => {
+      process.env.SQUAD_ENABLED = 'false';
+      await postInteraction(click('squad_stop'));
+      await waitUntil(() => deleteThread.mock.calls.length === 1);
+      delete process.env.SQUAD_ENABLED;
+    });
+
+    test('deletes the exported file(s) the bot mentioned and then the whole thread', async () => {
+      fetchThreadMessages.mockResolvedValue([
+        ...thread,
+        { ts: '2000.000003', bot_id: 'B1', text: `📄 *Đã xuất file markdown* — \`${EXPORT_PATH}\`` },
+      ]);
+      await postInteraction(click('squad_stop'));
+      await waitUntil(() => deleteThread.mock.calls.length === 1);
+
+      expect(deleteSquadExport).toHaveBeenCalledTimes(1);
+      expect(deleteSquadExport).toHaveBeenCalledWith(EXPORT_PATH);
+      expect(deleteThread).toHaveBeenCalledWith('CSQUAD', THREAD);
+      expect(preview).not.toHaveBeenCalled();
+    });
+
+    test('a path a person typed is never deleted', async () => {
+      fetchThreadMessages.mockResolvedValue([
+        { ts: THREAD, user: 'UMATE', text: `xoá ${EXPORT_PATH} đi` },
+        thread[1],
+      ]);
+      await postInteraction(click('squad_stop'));
+      await waitUntil(() => deleteThread.mock.calls.length === 1);
+      expect(deleteSquadExport).not.toHaveBeenCalled();
+    });
+
+    test('a thread with no export is deleted without touching any file', async () => {
+      await postInteraction(click('squad_stop'));
+      await waitUntil(() => deleteThread.mock.calls.length === 1);
+      expect(deleteSquadExport).not.toHaveBeenCalled();
+    });
+
+    test('a file that could not be deleted is logged, not previewed', async () => {
+      const err = jest.spyOn(console, 'error').mockImplementation(() => {});
+      fetchThreadMessages.mockResolvedValue([...thread, { ts: '2000.000003', bot_id: 'B1', text: `\`${EXPORT_PATH}\`` }]);
+      deleteSquadExport.mockReturnValue({ ok: false, error: 'EACCES' });
+      await postInteraction(click('squad_stop'));
+      await waitUntil(() => err.mock.calls.length === 1);
+
+      expect(err).toHaveBeenCalledWith(`[Squad stop] file not deleted: ${EXPORT_PATH} (EACCES)`);
+      expect(deleteThread).toHaveBeenCalledTimes(1);
+      err.mockRestore();
+    });
+
+    test('someone outside the squad is refused ephemerally and nothing is deleted', async () => {
+      await postInteraction(click('squad_stop', { user: { id: 'UOTHER' } }));
+      await waitUntil(() => respondEphemeral.mock.calls.length === 1);
+
+      expect(respondEphemeral).toHaveBeenCalledWith(expect.any(String), 'Only the squad can stop a session.');
+      expect(deleteThread).not.toHaveBeenCalled();
+    });
+
+    test('a click outside the squad channel is ignored', async () => {
+      await postInteraction(click('squad_stop', { channel: { id: 'COTHER' } }));
+      await new Promise(r => setTimeout(r, 50));
+      expect(deleteThread).not.toHaveBeenCalled();
+    });
+
+    test('an incomplete payload is ignored', async () => {
+      await postInteraction(click('squad_stop', { message: undefined }));
+      await new Promise(r => setTimeout(r, 50));
+      expect(deleteThread).not.toHaveBeenCalled();
+    });
+
+    test('uses the message ts when the click came from the thread root itself', async () => {
+      await postInteraction(click('squad_stop', { message: { ts: THREAD } }));
+      await waitUntil(() => deleteThread.mock.calls.length === 1);
+      expect(deleteThread).toHaveBeenCalledWith('CSQUAD', THREAD);
+    });
+
+    test('is refused while a run is in flight in the thread', async () => {
+      let finish;
+      runSquadExport.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+      await postInteraction(click('squad_export'));
+      await waitUntil(() => runSquadExport.mock.calls.length === 1);
+
+      await postInteraction(click('squad_stop'));
+      await waitUntil(() => respondEphemeral.mock.calls.length === 1);
+      expect(respondEphemeral.mock.calls[0][1]).toBe('⏳ Đang xử lý — thử lại khi có câu trả lời.');
+      expect(deleteThread).not.toHaveBeenCalled();
+
+      finish({ ok: true, markdown: '# Doc' });
+      await waitUntil(() => postToChannel.mock.calls.length === 2);
+    });
   });
 });
