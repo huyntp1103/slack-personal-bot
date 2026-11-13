@@ -1934,16 +1934,16 @@ async function runReviewForPr(prUrl, channel, threadTs, authorId) {
     // completion reply below.
     await deleteStartingReviewMessages(channel, threadTs, prNumber);
 
-    // Open findings → offer a one-click re-review for after the fixes are pushed.
-    // An approved PR needs no second pass, and a run that posted nothing has no
-    // findings to fix, so neither gets a button.
-    const showReviewAgain = !approved && Boolean(result.commentUrl);
+    // Every completed run offers a one-click re-review — even an approved PR or
+    // one with nothing posted: a teammate may still push more commits and want
+    // another pass without a fresh 👀. (A click on an unchanged head is refused
+    // by the no-new-commits guard, so the button costs nothing to leave up.)
     // P3-only findings can also be waved through by the PR owner (see isAcknowledgeable).
     const acknowledge = !approved && isAcknowledgeable(result);
     if (acknowledge) acknowledgeablePrs.add(prUrl);
     await replyToThread(channel, threadTs, doneText, {
       notify: false,
-      ...(showReviewAgain ? { blocks: reviewAgainBlocks(doneText, prUrl, prNumber, { acknowledge }) } : {}),
+      blocks: reviewAgainBlocks(doneText, prUrl, prNumber, { acknowledge }),
     });
   } finally {
     reviewsInFlight.delete(prUrl);

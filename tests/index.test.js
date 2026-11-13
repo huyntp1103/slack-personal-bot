@@ -1221,7 +1221,7 @@ describe('handleReviewRequestReaction', () => {
     );
   });
 
-  test('does not attach the "Review again" button once the PR is approved', async () => {
+  test('keeps the "Review again" button on an approved PR (a teammate may push more commits)', async () => {
     runPrReview.mockResolvedValue({
       ok: true,
       commentUrl: REVIEW_COMMENT_URL,
@@ -1231,14 +1231,18 @@ describe('handleReviewRequestReaction', () => {
     });
     await request(app).post('/slack/events').send(eyesPayload());
 
-    expect(replyToThread.mock.calls[1][3]?.blocks).toBeUndefined();
+    const blocks = replyToThread.mock.calls[1][3]?.blocks;
+    expect(blocks[0].text.text).toContain('approved on GitHub');
+    expect(blocks[1].elements.map(e => e.action_id)).toEqual(['review_pr_again']);
+    expect(blocks[1].elements[0].text.text).toBe('🔍 Review #18647 again');
   });
 
-  test('does not attach the button when nothing was posted', async () => {
+  test('keeps the "Review again" button when nothing was posted', async () => {
     runPrReview.mockResolvedValue({ ok: true, commentUrl: null, counts: null, summary: null });
     await request(app).post('/slack/events').send(eyesPayload());
 
-    expect(replyToThread.mock.calls[1][3]?.blocks).toBeUndefined();
+    const blocks = replyToThread.mock.calls[1][3]?.blocks;
+    expect(blocks[1].elements.map(e => e.action_id)).toEqual(['review_pr_again']);
   });
 
   test('renders the comment URL as a Slack link label, not a raw URL', async () => {
@@ -1373,7 +1377,13 @@ describe('handleReviewRequestReaction', () => {
       'C05F65TBB9P',
       '1712345678.901234',
       '✅ *PR #18647 approved on GitHub* — no blocking findings.',
-      { notify: false }
+      {
+        notify: false,
+        blocks: [
+          { type: 'section', text: { type: 'mrkdwn', text: '✅ *PR #18647 approved on GitHub* — no blocking findings.' } },
+          expect.objectContaining({ type: 'actions' }),
+        ],
+      }
     );
   });
 
@@ -1565,14 +1575,15 @@ describe('handleReviewRequestReaction', () => {
       expect(elements.map(e => e.action_id)).toEqual(['review_pr_again', 'review_pr_ack']);
     });
 
-    test('an auto-approved PR gets no buttons at all', async () => {
+    test('an auto-approved PR gets "Review again" only — never the acknowledge button', async () => {
       runPrReview.mockResolvedValue({
         ok: true, commentUrl: REVIEW_COMMENT_URL, summary: null, ...p3Only,
         verdict: { verdict: 'APPROVE', reason: 'clean', label: '✅ Ready to merge' },
       });
       await request(app).post('/slack/events').send(eyesPayload());
       await waitUntil(() => replyToThread.mock.calls.length >= 2);
-      expect(replyToThread.mock.calls[1][3]?.blocks).toBeUndefined();
+      const elements = replyToThread.mock.calls[1][3].blocks[1].elements;
+      expect(elements.map(e => e.action_id)).toEqual(['review_pr_again']);
     });
   });
 
