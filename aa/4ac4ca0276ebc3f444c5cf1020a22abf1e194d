@@ -1,0 +1,25 @@
+tests/index.test.js
+  s_2a01cb6fbe8883::t_6b82f5d5b30b18 1224,1234-1237,1240,1244-1245,1578,1585-1586
+  s_2a01cb6fbe8883::t_48fbaf51cefac7 1380-1386
+src/index.js
+  s_2a01cb6fbe8883::t_6b82f5d5b30b18 1937-1940,1946
+CLAUDE.md
+  s_2a01cb6fbe8883::t_f18ed03e499255 131
+  s_2a01cb6fbe8883::t_80c81d30ab537a 53
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "aa4ac4ca0276ebc3f444c5cf1020a22abf1e194d",
+  "prompts": {},
+  "sessions": {
+    "s_2a01cb6fbe8883": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "7772f74f-6bb8-4844-8750-55b17fb12113",
+        "model": "claude-sonnet-5-5"
+      },
+      "human_author": "Huy Nguyen Nhat <huyntp1103@gmail.com>"
+    }
+  }
+}
