@@ -1,0 +1,23 @@
+CLAUDE.md
+  s_2a01cb6fbe8883::t_0ae2278bf47a0d 215
+tests/jira.test.js
+  s_2a01cb6fbe8883::t_0ae2278bf47a0d 187,203
+src/jira.js
+  s_2a01cb6fbe8883::t_0ae2278bf47a0d 114
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "b3e05b89af9d58ea43c87976a3792ffaf28e17eb",
+  "prompts": {},
+  "sessions": {
+    "s_2a01cb6fbe8883": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "7772f74f-6bb8-4844-8750-55b17fb12113",
+        "model": "claude-sonnet-5-5"
+      },
+      "human_author": "Huy Nguyen Nhat <huyntp1103@gmail.com>"
+    }
+  }
+}
