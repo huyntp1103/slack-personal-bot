@@ -184,7 +184,7 @@ describe('createWorklog', () => {
     expect(arg.issueIdOrKey).toBe('UP-1');
     expect(arg.timeSpentSeconds).toBe(3600);
     expect(arg.comment).toBe(
-      '[Bot] Implement based on solution design & implementation plan, self-review, self-test'
+      'Implement based on solution design & implementation plan, self-review, self-test'
     );
     // started: YYYY-MM-DDT12:00:00.000+0700
     expect(arg.started).toMatch(/^\d{4}-\d{2}-\d{2}T12:00:00\.000\+0700$/);
@@ -200,7 +200,7 @@ describe('createWorklog', () => {
       issueIdOrKey: 'UP-1',
       timeSpentSeconds: 1800,
       started: '2026-05-09T12:00:00.000+0700',
-      comment: '[Bot] custom desc',
+      comment: 'custom desc',
     });
   });
 

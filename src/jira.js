@@ -111,7 +111,7 @@ async function createWorklog(issueKey, opts = {}) {
   const todayGmt7 = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Bangkok' });
   const started = opts.started ?? `${todayGmt7}T12:00:00.000+0700`;
 
-  const comment = `[Bot] ${description}`;
+  const comment = description;
 
   await preview(`⏱️ *Jira worklog*\nTicket: \`${issueKey}\`\nTime: \`${timeSpentSeconds}s\` Started: \`${started}\`\nComment: ${comment}`);
 
