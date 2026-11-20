@@ -150,6 +150,26 @@ function extractClientReportSummary(output) {
 }
 
 /**
+ * Fallback when the run emitted no marker block: the run's plain reply, so the
+ * findings still reach Slack instead of a "no summary" notice. Marker lines are
+ * dropped; the text is truncated like a normal digest.
+ *
+ * @param {string} output
+ * @returns {string|null} null when the run printed nothing usable
+ */
+function plainReplyFallback(output) {
+  const body = String(output || '')
+    .split('\n')
+    .filter(line => !line.includes(SUMMARY_START) && !line.includes(SUMMARY_END))
+    .join('\n')
+    .trim();
+  if (!body) return null;
+  return body.length > MAX_SUMMARY_CHARS
+    ? `${body.slice(0, MAX_SUMMARY_CHARS).trimEnd()}\n_…tóm tắt bị cắt — xem ghi chú đầy đủ trong repo._`
+    : body;
+}
+
+/**
  * Why the client-report skill can't run, or null when it can. Checked before
  * spawning so a missing clone/skill is reported instead of failing mid-run.
  *
@@ -252,7 +272,7 @@ function runClientReport(slackUrl, { model, hint, resumeSessionId, runKey } = {}
         const tail = (stderr || stdout).trim().slice(-MAX_ERROR_TAIL_CHARS);
         return resolve({ ok: false, error: `claude exited ${code}: ${tail}`, output: stdout });
       }
-      resolve({ ok: true, summary: extractClientReportSummary(stdout), sessionId, output: stdout });
+      resolve({ ok: true, summary: extractClientReportSummary(stdout) || plainReplyFallback(stdout), sessionId, output: stdout });
     });
   });
 }
@@ -275,6 +295,7 @@ module.exports = {
   cancelClientReport,
   clientReportSkipReason,
   extractClientReportSummary,
+  plainReplyFallback,
   extractSessionId,
   extractNotePaths,
   deleteClientReportNote,

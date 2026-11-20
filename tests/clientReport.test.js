@@ -13,6 +13,7 @@ const {
   cancelClientReport,
   clientReportSkipReason,
   extractClientReportSummary,
+  plainReplyFallback,
   extractSessionId,
   extractNotePaths,
   deleteClientReportNote,
@@ -66,6 +67,15 @@ describe('extractClientReportSummary', () => {
     const summary = extractClientReportSummary(out);
     expect(summary.startsWith('a'.repeat(2800))).toBe(true);
     expect(summary.endsWith('_…tóm tắt bị cắt — xem ghi chú đầy đủ trong repo._')).toBe(true);
+  });
+});
+
+describe('plainReplyFallback', () => {
+  test('drops marker lines, trims and truncates', () => {
+    expect(plainReplyFallback('CLIENT_REPORT_SUMMARY_START\n  hello \n')).toBe('hello');
+    expect(plainReplyFallback('  ')).toBeNull();
+    expect(plainReplyFallback(undefined)).toBeNull();
+    expect(plainReplyFallback('a'.repeat(3000)).endsWith('_…tóm tắt bị cắt — xem ghi chú đầy đủ trong repo._')).toBe(true);
   });
 });
 
@@ -139,11 +149,19 @@ describe('runClientReport', () => {
     expect(args).toEqual(expect.arrayContaining(['--permission-mode', 'acceptEdits', '--model', 'fallback-model']));
   });
 
-  test('ok with a null summary when the run printed no digest', async () => {
+  test('falls back to the plain reply when the run printed no digest markers', async () => {
     const child = fakeChild();
     spawn.mockReturnValue(child);
     const promise = runClientReport(LINK);
     child.stdout.emit('data', 'did stuff');
+    child.emit('close', 0);
+    expect(await promise).toEqual(expect.objectContaining({ ok: true, summary: 'did stuff' }));
+  });
+
+  test('ok with a null summary when the run printed nothing', async () => {
+    const child = fakeChild();
+    spawn.mockReturnValue(child);
+    const promise = runClientReport(LINK);
     child.emit('close', 0);
     expect(await promise).toEqual(expect.objectContaining({ ok: true, summary: null }));
   });
