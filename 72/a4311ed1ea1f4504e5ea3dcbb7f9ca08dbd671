@@ -1,0 +1,23 @@
+tests/clientReport.test.js
+  s_2a01cb6fbe8883::t_deda6a88f9acbf 16,73-81,152,158-164
+  s_2a01cb6fbe8883::t_2295c1e2e73de5 165
+src/clientReport.js
+  s_2a01cb6fbe8883::t_7166ec9594e5de 153-171,275,298
+  s_2a01cb6fbe8883::t_8db9c7d30f15b2 152
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "72a4311ed1ea1f4504e5ea3dcbb7f9ca08dbd671",
+  "prompts": {},
+  "sessions": {
+    "s_2a01cb6fbe8883": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "7772f74f-6bb8-4844-8750-55b17fb12113",
+        "model": "claude-sonnet-5-5"
+      },
+      "human_author": "Huy Nguyen Nhat <huyntp1103@gmail.com>"
+    }
+  }
+}
